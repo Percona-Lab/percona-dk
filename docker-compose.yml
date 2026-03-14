@@ -1,0 +1,38 @@
+services:
+  # Run ingestion first: docker compose run --rm ingest
+  ingest:
+    build: .
+    volumes:
+      - percona-dk-data:/data
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+    command: ["python", "-m", "percona_dk.ingest"]
+    profiles: ["ingest"]
+
+  # API server: docker compose up api
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - percona-dk-data:/data
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+    restart: unless-stopped
+
+  # MCP server (stdio): docker compose run --rm mcp
+  mcp:
+    build: .
+    volumes:
+      - percona-dk-data:/data
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+    command: ["python", "-m", "percona_dk.mcp_server"]
+    stdin_open: true
+    profiles: ["mcp"]
+
+volumes:
+  percona-dk-data:
