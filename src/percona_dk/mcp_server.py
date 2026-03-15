@@ -7,6 +7,8 @@ consumable by Claude Desktop, Claude Code, Cursor, or any MCP client.
 
 import os
 import logging
+import threading
+import time
 from pathlib import Path
 
 import chromadb
@@ -28,6 +30,54 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
 REPOS_DIR = DATA_DIR / "repos"
 CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
+REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "7"))  # auto-refresh if older than N days
+LAST_INGEST_FILE = DATA_DIR / ".last_ingest"
+
+
+# ---------------------------------------------------------------------------
+# Auto-refresh: re-ingest if data is stale
+# ---------------------------------------------------------------------------
+
+def _days_since_last_ingest() -> float | None:
+    """Return days since last ingestion, or None if never ingested."""
+    if not LAST_INGEST_FILE.exists():
+        # Fall back to checking if chroma dir exists and has data
+        if not CHROMA_DIR.exists():
+            return None
+        # Use chroma dir mtime as proxy
+        mtime = CHROMA_DIR.stat().st_mtime
+    else:
+        mtime = LAST_INGEST_FILE.stat().st_mtime
+    return (time.time() - mtime) / 86400
+
+
+def _background_refresh():
+    """Run ingestion in background thread so MCP server starts immediately."""
+    try:
+        from percona_dk.ingest import ingest
+        log.info("Auto-refresh: starting background ingestion (data is >%d days old)", REFRESH_DAYS)
+        result = ingest()
+        # Write timestamp marker
+        LAST_INGEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LAST_INGEST_FILE.write_text(str(time.time()))
+        log.info("Auto-refresh complete: %d chunks", result.get("chunks", 0))
+    except Exception:
+        log.exception("Auto-refresh failed (will retry next startup)")
+
+
+def _maybe_refresh():
+    """Check if data is stale and kick off background refresh if needed."""
+    days = _days_since_last_ingest()
+    if days is None:
+        log.info("No ingested data found — run 'percona-dk-ingest' first")
+        return
+    if days > REFRESH_DAYS:
+        log.info("Data is %.1f days old (threshold: %d) — refreshing in background", days, REFRESH_DAYS)
+        thread = threading.Thread(target=_background_refresh, daemon=True)
+        thread.start()
+    else:
+        log.info("Data is %.1f days old (threshold: %d) — fresh enough", days, REFRESH_DAYS)
+
 
 # ---------------------------------------------------------------------------
 # MCP Server
@@ -119,6 +169,7 @@ def main():
     """CLI entrypoint for percona-dk-mcp."""
     from percona_dk.version_check import print_version_notice
     print_version_notice()
+    _maybe_refresh()
     mcp.run()
 
 

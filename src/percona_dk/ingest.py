@@ -273,6 +273,10 @@ def ingest(repos: list[str] | None = None) -> dict:
         "chunks": len(all_chunks),
         "collection_count": collection.count(),
     }
+    # Write timestamp marker for auto-refresh checks
+    marker = DATA_DIR / ".last_ingest"
+    marker.write_text(str(__import__("time").time()))
+
     log.info("Ingestion complete: %s", stats)
     return stats
 
