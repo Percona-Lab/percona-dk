@@ -1,7 +1,7 @@
 # Percona Developer Knowledge (percona-dk)
 
 > **Status: Proof of Concept**
-> This is an early-stage prototype. The goal is to validate the approach and gather feedback. If useful, this could become a public resource for anyone using Percona products with AI tools.
+> This is an early-stage prototype. The goal is to validate the approach and gather feedback. With community interest, this could grow into an official Percona developer resource.
 
 Semantic search and retrieval of Percona documentation for AI assistants and developer tools.
 
