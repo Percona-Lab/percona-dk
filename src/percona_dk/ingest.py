@@ -279,6 +279,8 @@ def ingest(repos: list[str] | None = None) -> dict:
 
 def main():
     """CLI entrypoint for percona-dk-ingest."""
+    from percona_dk.version_check import print_version_notice
+    print_version_notice()
     result = ingest()
     print(f"\n✓ Ingestion complete: {result['chunks']} chunks loaded into ChromaDB")
 

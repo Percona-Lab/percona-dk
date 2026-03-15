@@ -117,6 +117,8 @@ def get_percona_doc(repo: str, path: str) -> str:
 
 def main():
     """CLI entrypoint for percona-dk-mcp."""
+    from percona_dk.version_check import print_version_notice
+    print_version_notice()
     mcp.run()
 
 

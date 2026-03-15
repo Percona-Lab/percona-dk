@@ -166,6 +166,8 @@ def health():
 
 def main():
     """CLI entrypoint for percona-dk-server."""
+    from percona_dk.version_check import print_version_notice
+    print_version_notice()
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
