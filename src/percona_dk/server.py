@@ -164,6 +164,12 @@ def health():
     )
 
 
+def main():
+    """CLI entrypoint for percona-dk-server."""
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
 @app.get("/stats")
 def stats():
     """Corpus statistics: total docs, chunks per repo, ingested repos."""

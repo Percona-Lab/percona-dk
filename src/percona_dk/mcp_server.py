@@ -115,5 +115,10 @@ def get_percona_doc(repo: str, path: str) -> str:
     return file_path.read_text(encoding="utf-8", errors="replace")
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entrypoint for percona-dk-mcp."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

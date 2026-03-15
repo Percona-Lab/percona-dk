@@ -1,8 +1,17 @@
 [project]
 name = "percona-dk"
 version = "0.1.0"
-description = "Percona Developer Knowledge — canonical, structured access to Percona documentation for AI assistants and tools"
+description = "Percona Developer Knowledge — semantic search and retrieval of Percona documentation for AI assistants and developer tools"
+readme = "README.md"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
+keywords = ["percona", "documentation", "mcp", "semantic-search", "chromadb"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Documentation",
+    "Topic :: Database",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
@@ -11,6 +20,11 @@ dependencies = [
     "gitpython>=3.1",
     "python-dotenv>=1.0",
 ]
+
+[project.scripts]
+percona-dk-ingest = "percona_dk.ingest:main"
+percona-dk-server = "percona_dk.server:main"
+percona-dk-mcp = "percona_dk.mcp_server:main"
 
 [project.optional-dependencies]
 dev = [

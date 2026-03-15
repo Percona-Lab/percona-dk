@@ -277,6 +277,11 @@ def ingest(repos: list[str] | None = None) -> dict:
     return stats
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entrypoint for percona-dk-ingest."""
     result = ingest()
     print(f"\n✓ Ingestion complete: {result['chunks']} chunks loaded into ChromaDB")
+
+
+if __name__ == "__main__":
+    main()
