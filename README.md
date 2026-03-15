@@ -7,6 +7,20 @@ Semantic search and retrieval of Percona documentation for AI assistants and dev
 
 **percona-dk** ingests official Percona documentation from source (GitHub repos), chunks and embeds it locally, and exposes it via REST API and [MCP](https://modelcontextprotocol.io/) server. Your AI tools get accurate, up-to-date Percona docs — no stale training data, no fragile web scraping.
 
+## Supported tools
+
+percona-dk works with any AI tool that supports MCP or HTTP APIs:
+
+| Tool | How it connects |
+|------|----------------|
+| **Claude Desktop** | MCP server (stdio) — add to `claude_desktop_config.json` |
+| **Claude Code** | MCP server (stdio) — add to `.claude/settings.json` |
+| **Cursor** | MCP server (stdio) — add to Cursor MCP settings |
+| **Windsurf** | MCP server (stdio) — add to Windsurf MCP settings |
+| **Open WebUI** | REST API — point to `http://localhost:8000` |
+| **Any MCP client** | MCP server (stdio) |
+| **Any HTTP client** | REST API on port 8000 |
+
 ## What it does
 
 ```
@@ -29,9 +43,9 @@ Percona doc repos (GitHub)
 └───────┘ └───────┘
 ```
 
-- **Ingestion pipeline** — clones 7 Percona doc repos, parses ~7,000 Markdown sections, embeds locally (no API keys needed)
+- **Ingestion pipeline** — clones Percona doc repos, parses ~7,000 Markdown sections, embeds locally (no API keys needed)
 - **REST API** — `POST /search`, `GET /document/{repo}/{path}`, `GET /health`, `GET /stats`
-- **MCP server** — `search_percona_docs` and `get_percona_doc` tools for Claude Desktop, Claude Code, Cursor, or any MCP client
+- **MCP server** — `search_percona_docs` and `get_percona_doc` tools for any MCP-compatible client
 
 ## Covered products
 
@@ -44,6 +58,20 @@ Percona doc repos (GitHub)
 | `percona/k8sps-docs` | Percona Operator for MySQL (PS) |
 | `percona/k8spxc-docs` | Percona Operator for MySQL (PXC) |
 | `percona/percona-valkey-doc` | Percona Distribution for Valkey |
+
+### Customizing the repo list
+
+Edit the `REPOS` line in your `.env` file to add or remove doc repos:
+
+```bash
+# Add a repo (e.g., Percona Toolkit docs):
+REPOS=percona/psmysql-docs,percona/pxc-docs,...,percona/percona-toolkit-docs
+
+# Or ingest just one repo for faster testing:
+REPOS=percona/pmm-doc
+```
+
+Any public `percona/*` GitHub repo with Markdown docs will work. After editing, run `percona-dk-ingest` to rebuild the index.
 
 ## Quick start
 
@@ -93,7 +121,9 @@ For Claude Code, add to `.claude/settings.json`:
 }
 ```
 
-Then ask Claude anything about Percona products — it will automatically search the docs.
+For Cursor, add via Settings → MCP Servers with the same command.
+
+Then ask your AI tool anything about Percona products — it will automatically search the docs.
 
 **Option B: REST API**
 
@@ -106,6 +136,24 @@ percona-dk-server
 curl -X POST http://localhost:8000/search \
   -H "Content-Type: application/json" \
   -d '{"query": "How to configure PMM for MySQL monitoring", "top_k": 5}'
+```
+
+## Keeping docs up to date
+
+The MCP server **automatically refreshes** docs in the background. On each startup, it checks when the last ingestion ran. If it's been more than 7 days (configurable), it pulls the latest docs and re-embeds — all in the background so the server starts immediately. Existing data stays searchable during the refresh.
+
+Configure the refresh interval in `.env`:
+
+```bash
+REFRESH_DAYS=7   # check every 7 days (default)
+REFRESH_DAYS=1   # check daily
+REFRESH_DAYS=0   # disable auto-refresh
+```
+
+You can also refresh manually at any time:
+
+```bash
+percona-dk-ingest
 ```
 
 ## Docker
@@ -124,10 +172,6 @@ docker compose up -d api          # start API server
 
 3. **Search**: Queries are embedded with the same model and matched against the corpus using cosine similarity. Results include the original Markdown text, source metadata, and relevance scores.
 
-## Re-ingesting (updating docs)
-
-Run `percona-dk-ingest` again. It pulls the latest from each repo and rebuilds the index.
-
 ## Project structure
 
 ```
@@ -135,7 +179,8 @@ percona-dk/
 ├── src/percona_dk/
 │   ├── ingest.py       # Ingestion pipeline
 │   ├── server.py       # FastAPI REST server
-│   └── mcp_server.py   # MCP server for AI tools
+│   ├── mcp_server.py   # MCP server for AI tools
+│   └── version_check.py # Update notifications
 ├── tests/
 ├── Dockerfile
 ├── docker-compose.yml
