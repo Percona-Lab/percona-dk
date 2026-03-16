@@ -87,18 +87,18 @@ def _get_configured_repos() -> set[str]:
 def suggest_repos(query: str, max_score: float) -> str | None:
     """Check if the query matches a known but unconfigured repo.
 
+    Always checks for keyword matches against unconfigured repos.
+    Uses a two-tier message: softer when existing results are decent
+    (the indexed docs mention the topic in passing), stronger when
+    results are weak or missing.
+
     Args:
         query: The user's search query (lowercased internally).
         max_score: The highest relevance score from search results (0-1).
-                   Suggestions only trigger when this is below a threshold.
 
     Returns:
         A suggestion string, or None if no suggestion applies.
     """
-    # Only suggest when results are weak
-    if max_score > 0.4:
-        return None
-
     configured = _get_configured_repos()
     query_lower = query.lower()
 
@@ -115,8 +115,19 @@ def suggest_repos(query: str, max_score: float) -> str | None:
         return None
 
     repos_str = ", ".join(f"`{r}`" for r in suggestions)
-    return (
-        f"\n\n---\n**Tip:** Your query may be relevant to {repos_str}, "
-        f"which is not currently in your configured repos. "
-        f"Add it to REPOS in your .env file and run `percona-dk-ingest` to index it."
-    )
+
+    if max_score > 0.6:
+        # Decent results exist, but the actual source docs aren't indexed
+        return (
+            f"\n\n---\n**Note:** The results above mention this topic, but the "
+            f"primary documentation lives in {repos_str}, which is not currently "
+            f"in your configured repos. Add it to REPOS in your .env file and "
+            f"run `percona-dk-ingest` for more complete results."
+        )
+    else:
+        # Weak or no results
+        return (
+            f"\n\n---\n**Tip:** Your query may be relevant to {repos_str}, "
+            f"which is not currently in your configured repos. "
+            f"Add it to REPOS in your .env file and run `percona-dk-ingest` to index it."
+        )

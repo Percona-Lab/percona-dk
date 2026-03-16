@@ -16,7 +16,14 @@ import chromadb
 import git
 from dotenv import load_dotenv
 
-load_dotenv()
+# Find .env relative to repo root so CLI commands work regardless of cwd.
+_pkg_dir = Path(__file__).resolve().parent.parent.parent
+for _candidate in [Path.cwd() / ".env", _pkg_dir / ".env"]:
+    if _candidate.is_file():
+        load_dotenv(_candidate)
+        break
+else:
+    load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +34,9 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
+_raw_data = os.getenv("DATA_DIR", "data")
+_data_path = Path(_raw_data)
+DATA_DIR = (_pkg_dir / _data_path).resolve() if not _data_path.is_absolute() else _data_path.resolve()
 REPOS_DIR = DATA_DIR / "repos"
 CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
