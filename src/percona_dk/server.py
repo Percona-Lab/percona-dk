@@ -69,6 +69,7 @@ class SearchResult(BaseModel):
 class SearchResponse(BaseModel):
     query: str
     results: list[SearchResult]
+    suggestion: str | None = None
 
 
 class HealthResponse(BaseModel):
@@ -110,7 +111,13 @@ def search(req: SearchRequest):
             )
 
     log.info("Search: %r → %d results", req.query[:80], len(items))
-    return SearchResponse(query=req.query, results=items)
+
+    # Check if the query might match an unconfigured repo
+    max_score = max((r.score for r in items), default=0.0)
+    from percona_dk.repo_registry import suggest_repos
+    suggestion = suggest_repos(req.query, max_score)
+
+    return SearchResponse(query=req.query, results=items, suggestion=suggestion)
 
 
 @app.get("/document/{repo}/{path:path}")

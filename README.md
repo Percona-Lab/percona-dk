@@ -1,7 +1,6 @@
 # Percona Developer Knowledge (percona-dk)
 
-> **Status: Proof of Concept**
-> This is an early-stage prototype. The goal is to validate the approach and gather feedback. With community interest, this could grow into an official Percona developer resource.
+> **Status:** Fully functional, ~7,000 doc chunks indexed, MCP + REST API working. With community interest, this could grow into an official Percona developer resource.
 
 Semantic search and retrieval of Percona documentation for AI assistants and developer tools.
 
@@ -190,7 +189,7 @@ percona-dk/
 
 ## Future direction
 
-This proof of concept validates that local semantic search over Percona docs is useful for AI-assisted development. Potential next steps:
+Potential next steps:
 
 - **Better embeddings** — swap in a larger model for improved search quality
 - **Incremental re-ingestion** — only re-embed changed files (based on git diff)

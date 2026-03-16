@@ -114,7 +114,12 @@ def search_percona_docs(query: str, top_k: int = 5) -> str:
     results = collection.query(query_texts=[query], n_results=top_k)
 
     if not results["documents"] or not results["documents"][0]:
-        return "No results found for your query."
+        from percona_dk.repo_registry import suggest_repos
+        suggestion = suggest_repos(query, 0.0)
+        msg = "No results found for your query."
+        if suggestion:
+            msg += suggestion
+        return msg
 
     output_parts: list[str] = []
     for i, (doc, meta, dist) in enumerate(
@@ -130,7 +135,20 @@ def search_percona_docs(query: str, top_k: int = 5) -> str:
         )
 
     log.info("MCP search: %r → %d results", query[:80], len(output_parts))
-    return "\n---\n".join(output_parts)
+
+    output = "\n---\n".join(output_parts)
+
+    # Check if the query might match an unconfigured repo
+    max_score = max(
+        (round(1.0 - d / 2.0, 4) for d in results["distances"][0]),
+        default=0.0,
+    )
+    from percona_dk.repo_registry import suggest_repos
+    suggestion = suggest_repos(query, max_score)
+    if suggestion:
+        output += suggestion
+
+    return output
 
 
 @mcp.tool()
