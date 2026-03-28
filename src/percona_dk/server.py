@@ -17,8 +17,10 @@ from pydantic import BaseModel, Field
 
 # Find .env relative to repo root so the server works regardless of cwd.
 _pkg_dir = Path(__file__).resolve().parent.parent.parent
+_env_dir = Path.cwd()  # default; updated if we find an actual .env
 for _candidate in [Path.cwd() / ".env", _pkg_dir / ".env"]:
     if _candidate.is_file():
+        _env_dir = _candidate.parent
         load_dotenv(_candidate)
         break
 else:
@@ -35,7 +37,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _raw_data = os.getenv("DATA_DIR", "data")
 _data_path = Path(_raw_data)
-DATA_DIR = (_pkg_dir / _data_path).resolve() if not _data_path.is_absolute() else _data_path.resolve()
+DATA_DIR = (_env_dir / _data_path).resolve() if not _data_path.is_absolute() else _data_path.resolve()
 REPOS_DIR = DATA_DIR / "repos"
 CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
