@@ -408,8 +408,8 @@ select_stack "Kubernetes Operators" \
   "percona/k8sppg-docs|Operator for PostgreSQL|n"
 
 select_stack "Tools" \
-  "percona/percona-toolkit-doc|Percona Toolkit|n" \
-  "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool|n"
+  "percona/percona-toolkit-doc|Percona Toolkit|y" \
+  "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool|y"
 
 if [ ${#SELECTED_REPOS[@]} -eq 0 ]; then
   warn "No repos selected — defaulting to percona/psmysql-docs"
