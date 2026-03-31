@@ -71,10 +71,9 @@ def _background_refresh():
         from percona_dk.ingest import ingest
         log.info("Auto-refresh: starting background ingestion (data is >%d days old)", REFRESH_DAYS)
         result = ingest()
-        # Write timestamp marker
-        LAST_INGEST_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LAST_INGEST_FILE.write_text(str(time.time()))
-        log.info("Auto-refresh complete: %d chunks", result.get("chunks", 0))
+        log.info("Auto-refresh complete: %d added, %d removed, %d total",
+                 result.get("chunks_added", 0), result.get("chunks_deleted", 0),
+                 result.get("collection_count", 0))
     except Exception:
         log.exception("Auto-refresh failed (will retry next startup)")
 
