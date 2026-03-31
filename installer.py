@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
@@ -312,15 +312,19 @@ def setup_env_file(install_dir: Path) -> tuple[list, int]:
 # Step 7: Fetch .md file counts from GitHub API in parallel
 # ---------------------------------------------------------------------------
 
-def fetch_md_count(repo_slug: str, results: dict, lock: threading.Lock) -> None:
+def fetch_md_count(repo_slug: str, results: dict, lock: threading.Lock, rate_limited: list) -> None:
     """Fetch .md file count for a repo and store in results dict."""
     owner, repo = repo_slug.split("/", 1)
     url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
     try:
-        req = Request(url, headers={
+        headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "percona-dk-installer",
-        })
+        }
+        token = os.environ.get("GITHUB_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = Request(url, headers=headers)
         with urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
         count = sum(
@@ -329,6 +333,11 @@ def fetch_md_count(repo_slug: str, results: dict, lock: threading.Lock) -> None:
         )
         with lock:
             results[repo_slug] = count
+    except HTTPError as e:
+        with lock:
+            if e.code in (403, 429):
+                rate_limited.append(repo_slug)
+            results[repo_slug] = None
     except Exception:
         with lock:
             results[repo_slug] = None
@@ -339,21 +348,25 @@ def fetch_all_md_counts() -> dict:
     print(c(BOLD, "Fetching repository sizes from GitHub..."))
     results = {}
     lock = threading.Lock()
+    rate_limited: list = []
 
     threads = []
     for i, repo_slug in enumerate(ALL_REPOS):
         if i > 0:
             time.sleep(0.1)  # stagger requests to avoid GitHub rate limiting
-        t = threading.Thread(target=fetch_md_count, args=(repo_slug, results, lock), daemon=True)
+        t = threading.Thread(target=fetch_md_count, args=(repo_slug, results, lock, rate_limited), daemon=True)
         t.start()
         threads.append(t)
 
     for t in threads:
         t.join()
 
-    # Report any failures
-    failed = [slug for slug, v in results.items() if v is None]
-    if failed:
+    if rate_limited:
+        print(f"\n  {YELLOW}GitHub API rate limit reached (60 req/hour for unauthenticated requests).{NC}")
+        print(f"  {DIM}Size estimates are unavailable but installation will proceed normally.{NC}")
+        print(f"  {DIM}The rate limit resets after an hour, or set GITHUB_TOKEN in your environment.{NC}\n")
+    elif any(v is None for v in results.values()):
+        failed = [slug for slug, v in results.items() if v is None]
         warn(f"Could not fetch sizes for: {', '.join(failed)}")
 
     print()
