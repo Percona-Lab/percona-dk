@@ -33,7 +33,7 @@ ask() {
   local prompt="$1"
   local default="$2"
   local answer
-  printf "  %s [${DIM}%s${NC}]: " "$prompt" "$default"
+  printf "  %s [${DIM}%s${NC}]: " "$prompt" "$default" >/dev/tty
   read -r answer </dev/tty
   echo "${answer:-$default}"
 }
@@ -43,7 +43,7 @@ confirm() {
   local default="${2:-y}"
   local hint
   if [ "$default" = "y" ]; then hint="Y/n"; else hint="y/N"; fi
-  printf "  %s (%s): " "$prompt" "$hint"
+  printf "  %s (%s): " "$prompt" "$hint" >/dev/tty
   local answer
   read -r answer </dev/tty
   answer="${answer:-$default}"
