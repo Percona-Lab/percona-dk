@@ -1,6 +1,6 @@
 # Percona Developer Knowledge (percona-dk)
 
-> **Status:** Fully functional, ~7,000 doc chunks indexed, MCP + REST API working. With community interest, this could grow into an official Percona developer resource.
+> **Status:** Fully functional, 21 doc repos across 6 stacks, MCP + REST API working. Supports Markdown and reStructuredText. With community interest, this could grow into an official Percona developer resource.
 
 Semantic search and retrieval of Percona documentation for AI assistants and developer tools.
 
@@ -52,7 +52,7 @@ Percona doc repos (GitHub)
         │
         ▼
   ┌─────────────┐
-  │  Ingestion   │  Clone repos → parse Markdown → chunk by heading → embed locally
+  │  Ingestion   │  Clone repos → parse Markdown/RST → chunk by heading → embed locally
   └──────┬──────┘
          ▼
   ┌─────────────┐
@@ -67,7 +67,7 @@ Percona doc repos (GitHub)
 └───────┘ └───────┘
 ```
 
-- **Ingestion pipeline** — clones Percona doc repos, parses Markdown sections, embeds locally (no API keys needed)
+- **Ingestion pipeline** — clones Percona doc repos, parses Markdown and reStructuredText sections, embeds locally (no API keys needed)
 - **REST API** — `POST /search`, `GET /document/{repo}/{path}`, `GET /health`, `GET /stats`
 - **MCP server** — `search_percona_docs` and `get_percona_doc` tools for any MCP-compatible client
 
@@ -80,17 +80,26 @@ The installer lets you choose which stacks to index. All repos are public Percon
 | **MySQL** | `percona/psmysql-docs` | Percona Server for MySQL |
 | **MySQL** | `percona/pxc-docs` | Percona XtraDB Cluster |
 | **MySQL** | `percona/pxb-docs` | Percona XtraBackup |
+| **MySQL** | `percona/pdmysql-docs` | Percona Distribution for MySQL |
+| **MySQL** | `percona/ps-binlog-server-docs` | Percona Binlog Server |
 | **MySQL** | `percona/pmm-doc` | Percona Monitoring and Management |
 | **MongoDB** | `percona/psmdb-docs` | Percona Server for MongoDB |
 | **MongoDB** | `percona/pbm-docs` | Percona Backup for MongoDB |
+| **MongoDB** | `percona/pcsm-docs` | Percona ClusterSync for MongoDB |
 | **PostgreSQL** | `percona/postgresql-docs` | Percona Distribution for PostgreSQL |
+| **PostgreSQL** | `percona/pg_tde` | pg_tde (Transparent Data Encryption) |
+| **PostgreSQL** | `percona/pgsm-docs` | pg_stat_monitor |
 | **Kubernetes Operators** | `percona/k8sps-docs` | Operator for MySQL |
 | **Kubernetes Operators** | `percona/k8spxc-docs` | Operator for PXC |
 | **Kubernetes Operators** | `percona/k8spsmdb-docs` | Operator for MongoDB |
-| **Kubernetes Operators** | `percona/k8sppg-docs` | Operator for PostgreSQL |
+| **Kubernetes Operators** | `percona/k8spg-docs` | Operator for PostgreSQL |
+| **OpenEverest** | `openeverest/everest-doc` | OpenEverest DBaaS Platform |
 | **Tools** | `percona/proxysql-admin-tool-doc` | ProxySQL Admin Tool |
+| **Tools** | `percona/percona-toolkit` | Percona Toolkit (RST docs) |
+| **Tools** | `percona/pmm_dump_docs` | PMM Dump |
+| **Tools** | `percona/repo-config-docs` | Percona Software Repositories |
 
-The MySQL stack and Tools are indexed by default. MongoDB, PostgreSQL, and Kubernetes Operators are opt-in during installation.
+The MySQL stack and Tools are indexed by default. MongoDB, PostgreSQL, Kubernetes Operators, and OpenEverest are opt-in during installation.
 
 ### Adding repos after installation
 
@@ -161,7 +170,7 @@ curl -X POST http://localhost:8000/search \
 
 ## How it works
 
-1. **Ingestion** (`percona-dk-ingest`): Shallow-clones each doc repo, walks all `.md` files, splits them at h2/h3 heading boundaries into chunks of ~500-800 tokens each. Metadata includes source repo, file path, heading hierarchy, and a constructed `docs.percona.com` URL.
+1. **Ingestion** (`percona-dk-ingest`): Shallow-clones each doc repo, walks all `.md` and `.rst` files, splits them at h2/h3 heading boundaries into chunks of ~500-800 tokens each. Metadata includes source repo, file path, heading hierarchy, and a constructed `docs.percona.com` URL.
 
 2. **Embedding**: ChromaDB's built-in `all-MiniLM-L6-v2` model generates 384-dimensional embeddings locally. No external API calls.
 
