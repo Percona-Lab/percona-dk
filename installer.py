@@ -466,7 +466,7 @@ def _run_selection(md_counts: dict, existing_repos: list) -> list:
 # ---------------------------------------------------------------------------
 
 def ask_refresh_days(existing_refresh: int) -> int:
-    raw = ask("Re-index docs every N days (0 to disable)", default=str(existing_refresh))
+    raw = ask("Full re-index every N days (0 to disable)", default=str(existing_refresh))
     try:
         return int(raw)
     except ValueError:
