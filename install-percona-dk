@@ -4,6 +4,7 @@
 #
 # Installs Percona Developer Knowledge MCP server and wires it up
 # to Claude Desktop and/or Claude Code automatically.
+# Safe to re-run: detects existing installs and preserves config.
 
 set -e
 
@@ -132,24 +133,37 @@ check_git() {
   ok "Git installed"
 }
 
-# ── Live repo size estimate from GitHub ──────────────────────
+# ── Detect Claude config paths (OS-aware) ────────────────────
 
-# Fetches .md file count for a repo via GitHub trees API and returns
-# a human-readable estimate string like "84 docs, ~1 min".
-# Falls back to "?" if the API is unreachable.
-fetch_repo_estimate() {
+detect_claude_desktop_config() {
+  case "$(uname -s)" in
+    Darwin) echo "$HOME/Library/Application Support/Claude/claude_desktop_config.json" ;;
+    Linux)  echo "$HOME/.config/Claude/claude_desktop_config.json" ;;
+    *)      echo "" ;;
+  esac
+}
+
+# ── Live repo estimates (parallel fetch) ─────────────────────
+# Fetches .md file counts from the GitHub trees API for all repos
+# simultaneously, then derives time estimates from the counts.
+# Results stored as REPO_EST_<owner>_<repo> variables.
+
+TMPDIR_ESTIMATES=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_ESTIMATES"' EXIT INT TERM
+
+_fetch_one() {
   local slug="$1"
   local owner="${slug%%/*}"
   local repo="${slug##*/}"
+  local outfile="$TMPDIR_ESTIMATES/${owner}_${repo}"
 
   local result
-  result=$(curl -sf --max-time 5 \
+  result=$(curl -sf --max-time 8 \
     "https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1" \
-    2>/dev/null) || { echo "?"; return; }
+    2>/dev/null) || { echo "?" > "$outfile"; return; }
 
-  "$PYTHON_BIN" - "$result" <<'PYEOF'
+  python3 - "$result" <<'PYEOF' > "$outfile"
 import json, sys, math
-
 try:
     data = json.loads(sys.argv[1])
     md_count = sum(1 for f in data.get("tree", []) if f["path"].endswith(".md"))
@@ -160,32 +174,26 @@ except Exception:
 PYEOF
 }
 
-# Preload estimates for all repos before showing prompts
-# (runs in parallel to avoid sequential delay)
 preload_estimates() {
-  local slugs=("$@")
-  for slug in "${slugs[@]}"; do
-    local key="${slug//\//_}"
-    local est
-    est=$(fetch_repo_estimate "$slug")
-    eval "REPO_EST_${key}=\"${est}\""
+  # Launch all fetches in parallel
+  for slug in "$@"; do
+    _fetch_one "$slug" &
   done
+  wait  # collect all background jobs
 }
 
 get_estimate() {
   local slug="$1"
-  local key="${slug//\//_}"
-  eval "echo \"\${REPO_EST_${key}:-?}\""
+  local owner="${slug%%/*}"
+  local repo="${slug##*/}"
+  local outfile="$TMPDIR_ESTIMATES/${owner}_${repo}"
+  cat "$outfile" 2>/dev/null || echo "?"
 }
 
-# ── Detect Claude config paths (OS-aware) ────────────────────
-
-detect_claude_desktop_config() {
-  case "$(uname -s)" in
-    Darwin) echo "$HOME/Library/Application Support/Claude/claude_desktop_config.json" ;;
-    Linux)  echo "$HOME/.config/Claude/claude_desktop_config.json" ;;
-    *)      echo "" ;;
-  esac
+# Extract just the minute number from an estimate string
+_est_mins() {
+  local est="$1"
+  python3 -c "import re,sys; m=re.search(r'~(\d+) min','$est'); print(m.group(1) if m else 1)"
 }
 
 # ── Prerequisites ─────────────────────────────────────────────
@@ -201,8 +209,19 @@ echo ""
 # ── Choose install location ───────────────────────────────────
 
 DEFAULT_DIR="$HOME/percona-dk"
+
+# Detect previous install
+if [ -d "$HOME/percona-dk/.git" ]; then
+  DEFAULT_DIR="$HOME/percona-dk"
+fi
+
 INSTALL_DIR=$(ask "Install directory" "$DEFAULT_DIR")
 INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
+
+IS_UPDATE=false
+if [ -d "$INSTALL_DIR/.git" ]; then
+  IS_UPDATE=true
+fi
 
 echo ""
 
@@ -210,7 +229,7 @@ echo ""
 
 REPO_URL="https://github.com/Percona-Lab/percona-dk.git"
 
-if [ -d "$INSTALL_DIR/.git" ]; then
+if [ "$IS_UPDATE" = true ]; then
   echo -e "${BOLD}Updating existing installation...${NC}"
   echo ""
   git -C "$INSTALL_DIR" pull --quiet
@@ -245,7 +264,10 @@ echo ""
 DOTENV_PATH="$INSTALL_DIR/.env"
 [ ! -f "$DOTENV_PATH" ] && cp "$INSTALL_DIR/.env.example" "$DOTENV_PATH"
 
-# ── Preload live repo estimates ───────────────────────────────
+# Read existing REPOS from .env so we can show current config on re-run
+EXISTING_REPOS=$(grep "^REPOS=" "$DOTENV_PATH" 2>/dev/null | cut -d= -f2- || echo "")
+
+# ── Preload live repo estimates in parallel ───────────────────
 
 ALL_REPO_SLUGS=(
   percona/psmysql-docs percona/pxc-docs percona/pxb-docs percona/pmm-doc
@@ -263,96 +285,120 @@ echo ""
 
 # ── Choose repos by stack ─────────────────────────────────────
 
-echo -e "${BOLD}Choose documentation repos to index${NC}"
-echo ""
-info "Select the Percona products you work with."
-info "Times are approximate on Apple Silicon — Linux may be slower."
-info "You can add more repos later by editing $DOTENV_PATH"
-info "and running percona-dk-ingest."
-echo ""
-
-SELECTED_REPOS=()
-
-# format: "slug|display name|default"
-
-echo -e "  ${BOLD}MySQL stack${NC}"
-for entry in \
-  "percona/psmysql-docs|Percona Server for MySQL|y" \
-  "percona/pxc-docs|XtraDB Cluster|y" \
-  "percona/pxb-docs|XtraBackup|y" \
-  "percona/pmm-doc|PMM (Percona Monitoring and Management)|y"
-do
-  slug="${entry%%|*}"; rest="${entry#*|}"; name="${rest%%|*}"; default="${rest##*|}"
-  est=$(get_estimate "$slug")
-  if confirm "  Index $name? ($est)" "$default"; then
-    SELECTED_REPOS+=("$slug")
+if [ "$IS_UPDATE" = true ] && [ -n "$EXISTING_REPOS" ]; then
+  echo -e "${BOLD}Configured repos${NC}"
+  echo ""
+  info "Current: $EXISTING_REPOS"
+  echo ""
+  if ! confirm "Change repo selection?" "n"; then
+    REPOS_VALUE="$EXISTING_REPOS"
+    SKIP_REPO_SELECT=true
   fi
-done
-
-echo ""
-echo -e "  ${BOLD}MongoDB stack${NC}"
-for entry in \
-  "percona/psmdb-docs|Percona Server for MongoDB|n" \
-  "percona/pbm-docs|Percona Backup for MongoDB|n" \
-  "percona/k8spsmdb-docs|Kubernetes Operator for MongoDB|n"
-do
-  slug="${entry%%|*}"; rest="${entry#*|}"; name="${rest%%|*}"; default="${rest##*|}"
-  est=$(get_estimate "$slug")
-  if confirm "  Index $name? ($est)" "$default"; then
-    SELECTED_REPOS+=("$slug")
-  fi
-done
-
-echo ""
-echo -e "  ${BOLD}PostgreSQL stack${NC}"
-for entry in \
-  "percona/postgresql-docs|Percona Distribution for PostgreSQL|n" \
-  "percona/k8sppg-docs|Kubernetes Operator for PostgreSQL|n"
-do
-  slug="${entry%%|*}"; rest="${entry#*|}"; name="${rest%%|*}"; default="${rest##*|}"
-  est=$(get_estimate "$slug")
-  if confirm "  Index $name? ($est)" "$default"; then
-    SELECTED_REPOS+=("$slug")
-  fi
-done
-
-echo ""
-echo -e "  ${BOLD}Platform and Tools${NC}"
-for entry in \
-  "percona/percona-toolkit-doc|Percona Toolkit|n" \
-  "percona/everest-doc|Percona Everest (DBaaS)|n" \
-  "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool|n" \
-  "percona/k8sps-docs|Kubernetes Operator for MySQL|n" \
-  "percona/k8spxc-docs|Kubernetes Operator for PXC|n"
-do
-  slug="${entry%%|*}"; rest="${entry#*|}"; name="${rest%%|*}"; default="${rest##*|}"
-  est=$(get_estimate "$slug")
-  if confirm "  Index $name? ($est)" "$default"; then
-    SELECTED_REPOS+=("$slug")
-  fi
-done
-
-echo ""
-
-if [ ${#SELECTED_REPOS[@]} -eq 0 ]; then
-  warn "No repos selected — defaulting to percona/psmysql-docs"
-  SELECTED_REPOS=("percona/psmysql-docs")
+  echo ""
 fi
 
-REPOS_VALUE=$(IFS=,; echo "${SELECTED_REPOS[*]}")
-ok "${#SELECTED_REPOS[@]} repo(s) selected"
+if [ "${SKIP_REPO_SELECT:-false}" = false ]; then
+  echo -e "${BOLD}Choose documentation repos to index${NC}"
+  echo ""
+  info "Select the Percona products you work with."
+  info "Times are approximate on Apple Silicon — Linux may be slower."
+  info "You can add more repos later by editing $DOTENV_PATH"
+  info "and running percona-dk-ingest."
+  echo ""
 
-echo ""
+  SELECTED_REPOS=()
+
+  # Helper: prompt for a whole stack or individual repos
+  # Usage: select_stack "Stack name" "slug1|Name1|default1" "slug2|Name2|default2" ...
+  select_stack() {
+    local stack_name="$1"
+    shift
+    local entries=("$@")
+
+    # Calculate stack total estimate
+    local stack_total=0
+    local stack_est_str=""
+    for entry in "${entries[@]}"; do
+      local slug="${entry%%|*}"
+      local est
+      est=$(get_estimate "$slug")
+      local mins
+      mins=$(_est_mins "$est")
+      stack_total=$((stack_total + mins))
+    done
+    stack_est_str="~${stack_total} min total"
+
+    echo -e "  ${BOLD}${stack_name}${NC} ${DIM}(${stack_est_str})${NC}"
+
+    if confirm "  Index entire ${stack_name}?" "y"; then
+      for entry in "${entries[@]}"; do
+        local slug="${entry%%|*}"
+        local rest="${entry#*|}"
+        local name="${rest%%|*}"
+        local est
+        est=$(get_estimate "$slug")
+        ok "  $name ($est)"
+        SELECTED_REPOS+=("$slug")
+      done
+    else
+      for entry in "${entries[@]}"; do
+        local slug="${entry%%|*}"
+        local rest="${entry#*|}"
+        local name="${rest%%|*}"
+        local default="${rest##*|}"
+        local est
+        est=$(get_estimate "$slug")
+        if confirm "    Index $name? ($est)" "$default"; then
+          SELECTED_REPOS+=("$slug")
+        fi
+      done
+    fi
+    echo ""
+  }
+
+  select_stack "MySQL stack" \
+    "percona/psmysql-docs|Percona Server for MySQL|y" \
+    "percona/pxc-docs|XtraDB Cluster|y" \
+    "percona/pxb-docs|XtraBackup|y" \
+    "percona/pmm-doc|PMM (Percona Monitoring and Management)|y"
+
+  select_stack "MongoDB stack" \
+    "percona/psmdb-docs|Percona Server for MongoDB|n" \
+    "percona/pbm-docs|Percona Backup for MongoDB|n" \
+    "percona/k8spsmdb-docs|Kubernetes Operator for MongoDB|n"
+
+  select_stack "PostgreSQL stack" \
+    "percona/postgresql-docs|Percona Distribution for PostgreSQL|n" \
+    "percona/k8sppg-docs|Kubernetes Operator for PostgreSQL|n"
+
+  select_stack "Platform and Tools" \
+    "percona/percona-toolkit-doc|Percona Toolkit|n" \
+    "percona/everest-doc|Percona Everest (DBaaS)|n" \
+    "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool|n" \
+    "percona/k8sps-docs|Kubernetes Operator for MySQL|n" \
+    "percona/k8spxc-docs|Kubernetes Operator for PXC|n"
+
+  if [ ${#SELECTED_REPOS[@]} -eq 0 ]; then
+    warn "No repos selected — defaulting to percona/psmysql-docs"
+    SELECTED_REPOS=("percona/psmysql-docs")
+  fi
+
+  REPOS_VALUE=$(IFS=,; echo "${SELECTED_REPOS[*]}")
+  ok "${#SELECTED_REPOS[@]} repo(s) selected"
+  echo ""
+fi
 
 # ── Choose sync frequency ─────────────────────────────────────
 
+EXISTING_REFRESH=$(grep "^REFRESH_DAYS=" "$DOTENV_PATH" 2>/dev/null | cut -d= -f2- || echo "7")
+
 echo -e "${BOLD}Auto-sync frequency${NC}"
 echo ""
-info "Percona DK re-indexes docs automatically in the background when the"
-info "MCP server starts and the data is older than the configured threshold."
+info "Percona DK re-indexes docs in the background when the MCP server"
+info "starts and data is older than the configured threshold."
 echo ""
 
-REFRESH_DAYS=$(ask "Re-index docs every N days (0 to disable)" "7")
+REFRESH_DAYS=$(ask "Re-index docs every N days (0 to disable)" "$EXISTING_REFRESH")
 
 echo ""
 
@@ -401,30 +447,46 @@ echo ""
 
 # ── Run initial ingestion ─────────────────────────────────────
 
-# Sum live per-repo estimates for the total
-REPO_COUNT=${#SELECTED_REPOS[@]}
-EST_TOTAL=0
-for slug in "${SELECTED_REPOS[@]}"; do
-  est=$(get_estimate "$slug")
-  mins=$(echo "$est" | "$PYTHON_BIN" -c "import sys,re; m=re.search(r'~(\d+) min',sys.stdin.read()); print(m.group(1) if m else 1)")
-  EST_TOTAL=$((EST_TOTAL + mins))
-done
+CHROMA_DIR="$INSTALL_DIR/data/chroma"
 
 echo -e "${BOLD}Indexing documentation...${NC}"
 echo ""
-info "Downloads and indexes ${REPO_COUNT} repo(s) — roughly ${EST_TOTAL}+ min on Apple Silicon."
-info "This runs once now; future updates happen automatically in the background."
-echo ""
 
-if confirm "Run initial ingestion now?" "y"; then
+if [ -d "$CHROMA_DIR" ]; then
+  ok "Documentation index already exists"
+  info "Auto-refresh is enabled — docs will re-index in the background every ${REFRESH_DAYS} day(s)."
   echo ""
-  DOTENV_PATH="$DOTENV_PATH" "$VENV_DIR/bin/percona-dk-ingest"
+  if ! confirm "Re-index now anyway?" "n"; then
+    SKIP_INGEST=true
+  fi
   echo ""
-  ok "Documentation indexed"
-else
+fi
+
+if [ "${SKIP_INGEST:-false}" = false ]; then
+  # Sum estimates for selected repos
+  EST_TOTAL=0
+  if [ -n "${SELECTED_REPOS+x}" ]; then
+    for slug in "${SELECTED_REPOS[@]}"; do
+      est=$(get_estimate "$slug")
+      mins=$(_est_mins "$est")
+      EST_TOTAL=$((EST_TOTAL + mins))
+    done
+  fi
+
+  info "Downloads and indexes selected repos — roughly ${EST_TOTAL}+ min on Apple Silicon."
+  info "This runs once now; future updates happen automatically in the background."
   echo ""
-  warn "Skipped. Run percona-dk-ingest manually before first use:"
-  info "  DOTENV_PATH=\"$DOTENV_PATH\" $VENV_DIR/bin/percona-dk-ingest"
+
+  if confirm "Run initial ingestion now?" "y"; then
+    echo ""
+    DOTENV_PATH="$DOTENV_PATH" "$VENV_DIR/bin/percona-dk-ingest"
+    echo ""
+    ok "Documentation indexed"
+  else
+    echo ""
+    warn "Skipped. Run percona-dk-ingest manually before first use:"
+    info "  DOTENV_PATH=\"$DOTENV_PATH\" $VENV_DIR/bin/percona-dk-ingest"
+  fi
 fi
 
 echo ""
