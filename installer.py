@@ -353,7 +353,7 @@ def fetch_all_md_counts() -> dict:
     threads = []
     for i, repo_slug in enumerate(ALL_REPOS):
         if i > 0:
-            time.sleep(0.1)  # stagger requests to avoid GitHub rate limiting
+            time.sleep(0.4)  # stagger requests to avoid GitHub secondary rate limiting
         t = threading.Thread(target=fetch_md_count, args=(repo_slug, results, lock, rate_limited), daemon=True)
         t.start()
         threads.append(t)
