@@ -644,9 +644,6 @@ def run_ingestion(install_dir: Path, selected_repos: list, existing_repos: list,
             except Exception:
                 pass
 
-        # Default to Y if repos changed, index is stale (>1 day), or we can't tell
-        reindex_default = repos_changed or (ingest_age_days is None) or (ingest_age_days > 1)
-
         if repos_changed:
             warn("Repo selection changed - re-indexing recommended.")
         elif ingest_age_days is not None:
@@ -655,7 +652,7 @@ def run_ingestion(install_dir: Path, selected_repos: list, existing_repos: list,
         else:
             print(f"  {DIM}Index exists.{NC}")
 
-        do_ingest = ask_yn("Re-index now?", default=reindex_default)
+        do_ingest = ask_yn("Re-index now?", default=True)
     else:
         total_docs = sum(md_counts.get(r, 0) or 0 for r in selected_repos)
         total_mins = max(1, math.ceil(total_docs * 7.5 / 1000))
