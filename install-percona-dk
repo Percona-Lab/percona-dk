@@ -1,0 +1,291 @@
+#!/bin/bash
+# Percona DK Installer
+# Usage: curl -fsSL https://raw.githubusercontent.com/Percona-Lab/percona-dk/main/install-percona-dk | bash
+#
+# Installs Percona Developer Knowledge MCP server and wires it up
+# to Claude Desktop and/or Claude Code automatically.
+
+set -e
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+ok()   { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
+warn() { printf "  ${YELLOW}!${NC} %s\n" "$1"; }
+fail() { printf "  ${RED}✗${NC} %s\n" "$1"; exit 1; }
+info() { printf "  ${DIM}%s${NC}\n" "$1"; }
+
+echo ""
+echo -e "${BOLD}============================================================"
+echo " Percona DK Installer"
+echo " Developer Knowledge — Percona docs in your AI assistant"
+echo -e "============================================================${NC}"
+echo ""
+
+# ── Helpers ──────────────────────────────────────────────────
+
+ask() {
+  local prompt="$1"
+  local default="$2"
+  local answer
+  if [ -n "$default" ]; then
+    printf "  %s [%s${DIM}%s%s]: " "$prompt" "${NC}" "$default" "${NC}"
+  else
+    printf "  %s: " "$prompt"
+  fi
+  read -r answer </dev/tty
+  echo "${answer:-$default}"
+}
+
+confirm() {
+  local prompt="$1"
+  local default="${2:-y}"
+  local hint
+  if [ "$default" = "y" ]; then hint="Y/n"; else hint="y/N"; fi
+  printf "  %s (%s): " "$prompt" "$hint"
+  local answer
+  read -r answer </dev/tty
+  answer="${answer:-$default}"
+  [[ "$answer" =~ ^[Yy] ]]
+}
+
+inject_mcp_config() {
+  local config_file="$1"
+  local python_bin="$2"
+  local dotenv_path="$3"
+
+  # Create the config file with empty structure if it doesn't exist
+  if [ ! -f "$config_file" ]; then
+    mkdir -p "$(dirname "$config_file")"
+    echo '{}' > "$config_file"
+  fi
+
+  # Use Python's json module (already available) to merge the MCP config
+  "$python_bin" - "$config_file" "$dotenv_path" <<'PYEOF'
+import json
+import sys
+
+config_file = sys.argv[1]
+dotenv_path = sys.argv[2]
+
+with open(config_file, "r") as f:
+    try:
+        config = json.load(f)
+    except json.JSONDecodeError:
+        config = {}
+
+config.setdefault("mcpServers", {})
+config["mcpServers"]["percona-dk"] = {
+    "command": sys.executable,
+    "args": ["-m", "percona_dk.mcp_server"],
+    "env": {"DOTENV_PATH": dotenv_path},
+}
+
+with open(config_file, "w") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+PYEOF
+}
+
+# ── Check prerequisites ───────────────────────────────────────
+
+echo -e "${BOLD}Checking prerequisites...${NC}"
+echo ""
+
+# Python 3.11+
+PYTHON=""
+for py in python3.13 python3.12 python3.11 python3; do
+  if command -v "$py" &>/dev/null; then
+    ver=$("$py" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+    major=$(echo "$ver" | cut -d. -f1)
+    minor=$(echo "$ver" | cut -d. -f2)
+    if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
+      PYTHON="$py"
+      ok "Python $ver ($py)"
+      break
+    fi
+  fi
+done
+
+if [ -z "$PYTHON" ]; then
+  fail "Python 3.11+ is required. Install it from https://www.python.org/downloads/ or via your package manager."
+fi
+
+# Git
+if command -v git &>/dev/null; then
+  ok "Git ($(git --version | awk '{print $3}'))"
+else
+  fail "Git is required. Install it from https://git-scm.com or via your package manager."
+fi
+
+echo ""
+
+# ── Choose install location ───────────────────────────────────
+
+DEFAULT_DIR="$HOME/percona-dk"
+INSTALL_DIR=$(ask "Install directory" "$DEFAULT_DIR")
+INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"  # expand leading ~
+
+echo ""
+
+# ── Clone or update repo ──────────────────────────────────────
+
+REPO_URL="https://github.com/Percona-Lab/percona-dk.git"
+
+if [ -d "$INSTALL_DIR/.git" ]; then
+  echo -e "${BOLD}Updating existing installation...${NC}"
+  echo ""
+  git -C "$INSTALL_DIR" pull --quiet
+  ok "Updated to latest version"
+else
+  echo -e "${BOLD}Cloning repository...${NC}"
+  echo ""
+  git clone --quiet "$REPO_URL" "$INSTALL_DIR"
+  ok "Repository cloned to $INSTALL_DIR"
+fi
+
+echo ""
+
+# ── Create virtual environment ────────────────────────────────
+
+echo -e "${BOLD}Setting up Python environment...${NC}"
+echo ""
+
+VENV_DIR="$INSTALL_DIR/.venv"
+
+if [ ! -d "$VENV_DIR" ]; then
+  "$PYTHON" -m venv "$VENV_DIR"
+  ok "Virtual environment created"
+else
+  ok "Virtual environment already exists"
+fi
+
+PYTHON_BIN="$VENV_DIR/bin/python"
+PIP_BIN="$VENV_DIR/bin/pip"
+
+# Install/upgrade the package
+"$PIP_BIN" install --quiet --upgrade pip
+"$PIP_BIN" install --quiet -e "$INSTALL_DIR"
+ok "percona-dk installed"
+
+echo ""
+
+# ── Configure .env ────────────────────────────────────────────
+
+DOTENV_PATH="$INSTALL_DIR/.env"
+
+if [ ! -f "$DOTENV_PATH" ]; then
+  cp "$INSTALL_DIR/.env.example" "$DOTENV_PATH"
+fi
+
+echo -e "${BOLD}Configure documentation repos${NC}"
+echo ""
+info "Percona DK indexes doc repos from GitHub and makes them searchable."
+info "The more repos you add, the more complete your results."
+echo ""
+info "Available repos (comma-separated):"
+info "  percona/psmysql-docs   - Percona Server for MySQL"
+info "  percona/pxc-docs       - XtraDB Cluster"
+info "  percona/pxb-docs       - XtraBackup"
+info "  percona/pmm-doc        - Percona Monitoring and Management"
+info "  percona/psmdb-docs     - Percona Server for MongoDB"
+info "  percona/postgresql-docs - Percona Distribution for PostgreSQL"
+info "  percona/percona-toolkit-doc - Percona Toolkit"
+info "  percona/k8sps-docs     - Kubernetes Operator for MySQL"
+info "  percona/k8spxc-docs    - Kubernetes Operator for PXC"
+info "  percona/k8spsmdb-docs  - Kubernetes Operator for MongoDB"
+info "  percona/everest-doc    - Percona Everest"
+echo ""
+
+DEFAULT_REPOS="percona/psmysql-docs,percona/pxc-docs,percona/pxb-docs,percona/pmm-doc"
+REPOS=$(ask "Repos to index" "$DEFAULT_REPOS")
+
+# Write REPOS to .env (replace existing value if present)
+if grep -q "^REPOS=" "$DOTENV_PATH"; then
+  # Replace in-place (macOS + Linux compatible)
+  "$PYTHON_BIN" -c "
+import re, pathlib
+p = pathlib.Path('$DOTENV_PATH')
+text = p.read_text()
+text = re.sub(r'^REPOS=.*', 'REPOS=$REPOS', text, flags=re.MULTILINE)
+p.write_text(text)
+"
+else
+  echo "REPOS=$REPOS" >> "$DOTENV_PATH"
+fi
+
+ok ".env configured"
+echo ""
+
+# ── Wire up MCP config ────────────────────────────────────────
+
+echo -e "${BOLD}Connecting to AI clients...${NC}"
+echo ""
+
+WIRED_ANYTHING=false
+
+# Claude Desktop (macOS)
+CLAUDE_DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+if [ -d "$HOME/Library/Application Support/Claude" ] || confirm "Configure Claude Desktop?" "y"; then
+  inject_mcp_config "$CLAUDE_DESKTOP_CONFIG" "$PYTHON_BIN" "$DOTENV_PATH"
+  ok "Claude Desktop configured ($CLAUDE_DESKTOP_CONFIG)"
+  WIRED_ANYTHING=true
+fi
+
+# Claude Code (settings.json)
+CLAUDE_CODE_CONFIG="$HOME/.claude/settings.json"
+if [ -f "$CLAUDE_CODE_CONFIG" ] || confirm "Configure Claude Code (CLI)?" "y"; then
+  inject_mcp_config "$CLAUDE_CODE_CONFIG" "$PYTHON_BIN" "$DOTENV_PATH"
+  ok "Claude Code configured ($CLAUDE_CODE_CONFIG)"
+  WIRED_ANYTHING=true
+fi
+
+echo ""
+
+# ── Run initial ingestion ─────────────────────────────────────
+
+echo -e "${BOLD}Indexing documentation...${NC}"
+echo ""
+info "This downloads the selected repos and builds a local semantic search index."
+info "It may take a few minutes depending on the number of repos."
+echo ""
+
+if confirm "Run initial ingestion now?" "y"; then
+  echo ""
+  DOTENV_PATH="$DOTENV_PATH" "$VENV_DIR/bin/percona-dk-ingest"
+  echo ""
+  ok "Documentation indexed"
+else
+  echo ""
+  warn "Skipped. Run 'percona-dk-ingest' manually before first use."
+  info "  export DOTENV_PATH=\"$DOTENV_PATH\""
+  info "  $VENV_DIR/bin/percona-dk-ingest"
+fi
+
+echo ""
+
+# ── Done ──────────────────────────────────────────────────────
+
+echo -e "${BOLD}${GREEN}============================================================"
+echo " Percona DK is ready!"
+echo -e "============================================================${NC}"
+echo ""
+ok "Installed to: $INSTALL_DIR"
+ok "MCP server: $PYTHON_BIN -m percona_dk.mcp_server"
+
+if [ "$WIRED_ANYTHING" = true ]; then
+  echo ""
+  echo -e "  ${YELLOW}Restart Claude Desktop / Claude Code for the changes to take effect.${NC}"
+fi
+
+echo ""
+info "To re-index docs at any time:"
+info "  DOTENV_PATH=\"$DOTENV_PATH\" $VENV_DIR/bin/percona-dk-ingest"
+echo ""
+info "To add more repos, edit: $DOTENV_PATH"
+info "Then re-run percona-dk-ingest."
+echo ""
