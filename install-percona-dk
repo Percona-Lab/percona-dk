@@ -29,13 +29,15 @@ echo ""
 
 # ── Helpers ──────────────────────────────────────────────────
 
+# ask: sets global REPLY to user input (or default).
+# Called directly — never inside $() — to avoid subshell/tty issues.
+REPLY=""
 ask() {
   local prompt="$1"
   local default="$2"
-  local answer
   printf "  %s [${DIM}%s${NC}]: " "$prompt" "$default" >/dev/tty
-  read -r answer </dev/tty
-  echo "${answer:-$default}"
+  read -r REPLY </dev/tty
+  REPLY="${REPLY:-$default}"
 }
 
 confirm() {
@@ -215,8 +217,8 @@ if [ -d "$HOME/percona-dk/.git" ]; then
   DEFAULT_DIR="$HOME/percona-dk"
 fi
 
-INSTALL_DIR=$(ask "Install directory" "$DEFAULT_DIR")
-INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
+ask "Install directory" "$DEFAULT_DIR"
+INSTALL_DIR="${REPLY/#\~/$HOME}"
 
 IS_UPDATE=false
 if [ -d "$INSTALL_DIR/.git" ]; then
@@ -406,7 +408,8 @@ info "Percona DK re-indexes docs in the background when the MCP server"
 info "starts and data is older than the configured threshold."
 echo ""
 
-REFRESH_DAYS=$(ask "Re-index docs every N days (0 to disable)" "$EXISTING_REFRESH")
+ask "Re-index docs every N days (0 to disable)" "$EXISTING_REFRESH"
+REFRESH_DAYS="$REPLY"
 
 echo ""
 
