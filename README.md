@@ -129,7 +129,7 @@ For Claude Code: `~/.claude/settings.json`.
 
 ## Keeping docs up to date
 
-The MCP server **automatically refreshes** docs in the background. On each startup, it checks when the last ingestion ran. If it's been more than 7 days (configurable), it pulls the latest docs and re-embeds — all in the background so the server starts immediately. Existing data stays searchable during the refresh.
+The MCP server **automatically syncs** docs in the background. On each startup, it checks when the last sync ran. If it's been more than 7 days (configurable), it pulls the latest from GitHub and re-embeds only the files that changed — all in the background so the server starts immediately. Existing data stays searchable during the sync.
 
 Configure the refresh interval in `.env`:
 
@@ -189,7 +189,6 @@ percona-dk/
 Potential next steps:
 
 - **Better embeddings** — swap in a larger model for improved search quality
-- **Incremental re-ingestion** — only re-embed changed files (based on git diff)
 - **Version-aware search** — filter results by product version (8.0 vs 8.4)
 - **Expanded corpus** — blog posts, knowledge base articles
 - **Hosted service** — centrally hosted API for team-wide or customer access
