@@ -1,9 +1,10 @@
 """
 Percona Developer Knowledge — Ingestion Pipeline
 
-Clones Percona doc repos from GitHub, parses Markdown source files,
-chunks by h2/h3 headings, and loads into ChromaDB for semantic search.
-ChromaDB handles embedding locally via its default model (all-MiniLM-L6-v2).
+Clones Percona doc repos from GitHub, parses Markdown and reStructuredText
+source files, chunks by h2/h3 headings, and loads into ChromaDB for
+semantic search.  ChromaDB handles embedding locally via its default model
+(all-MiniLM-L6-v2).
 
 Supports incremental re-ingestion: on subsequent runs, only files whose
 content changed since the last ingest are re-chunked and re-embedded.
@@ -101,6 +102,15 @@ def clone_or_pull(repo_slug: str) -> Path | None:
 
 _HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
 
+# RST heading detection: a line of text followed by an underline of =, -, or ~.
+# =  -> h1,  -  -> h2,  ~  -> h3  (common Sphinx convention)
+_RST_HEADING_RE = re.compile(
+    r"^(?P<title>.+)\n(?P<underline>[=\-~]{3,})\s*$", re.MULTILINE
+)
+_RST_LEVEL = {"=": 1, "-": 2, "~": 3}
+
+DOC_EXTENSIONS = ("*.md", "*.rst")
+
 
 def _build_page_url(repo_slug: str, file_path: str) -> str:
     """Construct a docs.percona.com URL from repo slug and file path."""
@@ -108,7 +118,7 @@ def _build_page_url(repo_slug: str, file_path: str) -> str:
     for prefix in ("docs/", "source/"):
         if rel.startswith(prefix):
             rel = rel[len(prefix):]
-    rel = re.sub(r"\.md$", "", rel)
+    rel = re.sub(r"\.(md|rst)$", "", rel)
     product = repo_slug.split("/")[-1].replace("-docs", "").replace("_", "-")
     return f"https://docs.percona.com/{product}/latest/{rel}/"
 
@@ -172,34 +182,110 @@ def chunk_markdown(text: str, repo_slug: str, file_path: str) -> list[dict]:
     return chunks
 
 
+def chunk_rst(text: str, repo_slug: str, file_path: str) -> list[dict]:
+    """Split a reStructuredText file into chunks at heading boundaries."""
+    headings: list[tuple[int, int, str]] = []
+    for m in _RST_HEADING_RE.finditer(text):
+        char = m.group("underline")[0]
+        level = _RST_LEVEL.get(char, 2)
+        title = m.group("title").strip().strip(":").strip("`").strip()
+        if title:
+            headings.append((m.start(), level, title))
+
+    page_url = _build_page_url(repo_slug, file_path)
+
+    if not headings:
+        stripped = text.strip()
+        if not stripped:
+            return []
+        return [
+            {
+                "text": stripped[:MAX_CHUNK_CHARS],
+                "source_repo": repo_slug,
+                "file_path": file_path,
+                "heading_hierarchy": [],
+                "page_url": page_url,
+            }
+        ]
+
+    chunks: list[dict] = []
+    hierarchy: list[str] = []
+
+    for i, (pos, level, title) in enumerate(headings):
+        start = pos
+        end = headings[i + 1][0] if i + 1 < len(headings) else len(text)
+        section_text = text[start:end].strip()
+        if not section_text:
+            continue
+        hierarchy = [h for j, h in enumerate(hierarchy) if j < level - 1]
+        while len(hierarchy) < level - 1:
+            hierarchy.append("")
+        hierarchy = hierarchy[: level - 1] + [title]
+        chunks.append(
+            {
+                "text": section_text[:MAX_CHUNK_CHARS],
+                "source_repo": repo_slug,
+                "file_path": file_path,
+                "heading_hierarchy": list(hierarchy),
+                "page_url": page_url,
+            }
+        )
+
+    pre_heading_text = text[: headings[0][0]].strip()
+    if pre_heading_text:
+        chunks.insert(
+            0,
+            {
+                "text": pre_heading_text[:MAX_CHUNK_CHARS],
+                "source_repo": repo_slug,
+                "file_path": file_path,
+                "heading_hierarchy": [],
+                "page_url": page_url,
+            },
+        )
+
+    return chunks
+
+
 # ---------------------------------------------------------------------------
 # Walk repo and collect chunks
 # ---------------------------------------------------------------------------
 
+def _find_doc_files(repo_path: Path) -> list[Path]:
+    """Return all .md and .rst files in a repo, sorted."""
+    files = []
+    for ext in DOC_EXTENSIONS:
+        files.extend(repo_path.rglob(ext))
+    return sorted(set(files))
+
+
 def collect_chunks(repo_slug: str, repo_path: Path) -> list[dict]:
-    """Walk all .md files in a repo and return chunks."""
+    """Walk all doc files (.md, .rst) in a repo and return chunks."""
     all_chunks: list[dict] = []
-    md_files = sorted(repo_path.rglob("*.md"))
-    log.info("Found %d .md files in %s", len(md_files), repo_slug)
-    for md_file in md_files:
-        rel_path = str(md_file.relative_to(repo_path))
+    doc_files = _find_doc_files(repo_path)
+    log.info("Found %d doc files in %s", len(doc_files), repo_slug)
+    for doc_file in doc_files:
+        rel_path = str(doc_file.relative_to(repo_path))
         if any(part.startswith(".") for part in Path(rel_path).parts):
             continue
-        text = md_file.read_text(encoding="utf-8", errors="replace")
-        chunks = chunk_markdown(text, repo_slug, rel_path)
+        text = doc_file.read_text(encoding="utf-8", errors="replace")
+        if doc_file.suffix == ".rst":
+            chunks = chunk_rst(text, repo_slug, rel_path)
+        else:
+            chunks = chunk_markdown(text, repo_slug, rel_path)
         all_chunks.extend(chunks)
     log.info("Collected %d chunks from %s", len(all_chunks), repo_slug)
     return all_chunks
 
 
 def _scan_file_hashes(repo_slug: str, repo_path: Path) -> dict[str, str]:
-    """Return {rel_path: sha256} for all tracked .md files in the repo."""
+    """Return {rel_path: sha256} for all tracked doc files in the repo."""
     hashes = {}
-    for md_file in sorted(repo_path.rglob("*.md")):
-        rel_path = str(md_file.relative_to(repo_path))
+    for doc_file in _find_doc_files(repo_path):
+        rel_path = str(doc_file.relative_to(repo_path))
         if any(part.startswith(".") for part in Path(rel_path).parts):
             continue
-        hashes[rel_path] = hashlib.sha256(md_file.read_bytes()).hexdigest()
+        hashes[rel_path] = hashlib.sha256(doc_file.read_bytes()).hexdigest()
     return hashes
 
 

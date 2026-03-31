@@ -50,6 +50,8 @@ STACKS = [
             "percona/psmysql-docs",
             "percona/pxc-docs",
             "percona/pxb-docs",
+            "percona/pdmysql-docs",
+            "percona/ps-binlog-server-docs",
             "percona/pmm-doc",
         ],
     },
@@ -58,12 +60,15 @@ STACKS = [
         "repos": [
             "percona/psmdb-docs",
             "percona/pbm-docs",
+            "percona/pcsm-docs",
         ],
     },
     {
         "name": "PostgreSQL stack",
         "repos": [
             "percona/postgresql-docs",
+            "percona/pg_tde",
+            "percona/pgsm-docs",
         ],
     },
     {
@@ -76,9 +81,18 @@ STACKS = [
         ],
     },
     {
+        "name": "OpenEverest",
+        "repos": [
+            "openeverest/everest-doc",
+        ],
+    },
+    {
         "name": "Tools",
         "repos": [
             "percona/proxysql-admin-tool-doc",
+            "percona/percona-toolkit",
+            "percona/pmm_dump_docs",
+            "percona/repo-config-docs",
         ],
     },
 ]
@@ -87,21 +101,30 @@ ALL_REPOS = [repo for stack in STACKS for repo in stack["repos"]]
 
 REPO_URL = "https://github.com/Percona-Lab/percona-dk.git"
 
-# Approximate .md file counts used as fallback when the GitHub API is unavailable.
+# Approximate doc file counts used as fallback when the GitHub API is unavailable.
 # Updated periodically - good enough for time/disk estimates.
 FALLBACK_MD_COUNTS: dict[str, int] = {
     "percona/psmysql-docs": 249,
     "percona/pxc-docs": 80,
     "percona/pxb-docs": 115,
+    "percona/pdmysql-docs": 42,
+    "percona/ps-binlog-server-docs": 6,
     "percona/pmm-doc": 228,
     "percona/psmdb-docs": 75,
     "percona/pbm-docs": 147,
+    "percona/pcsm-docs": 40,
     "percona/postgresql-docs": 69,
+    "percona/pg_tde": 61,
+    "percona/pgsm-docs": 31,
     "percona/k8sps-docs": 84,
     "percona/k8spxc-docs": 144,
     "percona/k8spsmdb-docs": 175,
     "percona/k8spg-docs": 121,
+    "openeverest/everest-doc": 122,
     "percona/proxysql-admin-tool-doc": 62,
+    "percona/percona-toolkit": 30,
+    "percona/pmm_dump_docs": 35,
+    "percona/repo-config-docs": 15,
 }
 
 # ---------------------------------------------------------------------------

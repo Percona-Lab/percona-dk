@@ -61,8 +61,46 @@ KNOWN_REPOS: dict[str, list[str]] = {
         "operator for postgresql", "k8s postgresql", "kubernetes postgresql",
         "k8spg", "ppg operator", "percona operator postgresql",
     ],
+    "percona/pdmysql-docs": [
+        "percona distribution mysql", "pdmysql", "distribution for mysql",
+        "mysql distribution",
+    ],
+    "percona/ps-binlog-server-docs": [
+        "binlog server", "binary log server", "ps-binlog",
+        "replication binlog",
+    ],
+    "percona/pg_tde": [
+        "pg_tde", "transparent data encryption", "tde", "postgresql encryption",
+        "percona tde",
+    ],
+    "percona/pgsm-docs": [
+        "pg_stat_monitor", "pgsm", "query performance monitoring",
+        "pg stat monitor",
+    ],
+    "percona/pcsm-docs": [
+        "clustersync", "cluster sync", "pcsm", "mongodb migration",
+        "percona clustersync", "data migration mongodb",
+    ],
+    "percona/pmm_dump_docs": [
+        "pmm dump", "pmm-dump", "pmm backup", "pmm metrics export",
+    ],
+    "percona/repo-config-docs": [
+        "percona repo", "percona repository", "percona-release",
+        "software repositories", "percona packages",
+    ],
+    "percona/percona-toolkit": [
+        "percona toolkit", "pt-query-digest", "pt-online-schema-change",
+        "pt-table-checksum", "pt-table-sync", "pt-heartbeat", "pt-archiver",
+        "pt-stalk", "pt-summary", "pt-kill", "pt-show-grants",
+        "pt-galera-log-explainer", "pt-mongodb", "pt-secure-collect",
+        "pt-k8s-debug-collector", "pt-pg-summary",
+    ],
     "percona/everest-doc": [
         "everest", "percona everest", "dbaas", "database as a service",
+    ],
+    "openeverest/everest-doc": [
+        "openeverest", "open everest", "everest open source",
+        "everest kubernetes", "everest dbaas",
     ],
     "percona/proxysql-admin-tool-doc": [
         "proxysql", "proxy sql", "proxysql admin",
