@@ -52,19 +52,29 @@ MAX_CHUNK_CHARS = 4000  # rough limit to stay within token budget
 # Repo cloning / pulling
 # ---------------------------------------------------------------------------
 
-def clone_or_pull(repo_slug: str) -> Path:
-    """Clone a GitHub repo (or pull if already cloned). Returns the local path."""
+def clone_or_pull(repo_slug: str) -> Path | None:
+    """Clone a GitHub repo (or pull if already cloned). Returns the local path, or None on failure."""
     repo_url = f"https://github.com/{repo_slug}.git"
     local_path = REPOS_DIR / repo_slug.replace("/", "_")
 
-    if (local_path / ".git").exists():
-        log.info("Pulling latest for %s", repo_slug)
-        repo = git.Repo(local_path)
-        repo.remotes.origin.pull()
-    else:
-        log.info("Cloning %s → %s", repo_url, local_path)
-        local_path.mkdir(parents=True, exist_ok=True)
-        git.Repo.clone_from(repo_url, local_path, depth=1)
+    try:
+        if (local_path / ".git").exists():
+            log.info("Pulling latest for %s", repo_slug)
+            repo = git.Repo(local_path)
+            repo.remotes.origin.pull()
+        else:
+            log.info("Cloning %s → %s", repo_url, local_path)
+            local_path.mkdir(parents=True, exist_ok=True)
+            git.Repo.clone_from(repo_url, local_path, depth=1)
+    except git.GitCommandError as e:
+        stderr = str(e).lower()
+        if "repository not found" in stderr or "not found" in stderr:
+            print(f"\n  ! Repo not found: {repo_slug}")
+            print(f"    The repository https://github.com/{repo_slug} does not exist.")
+            print(f"    Check the repo name in your .env file and remove or correct it.\n")
+        else:
+            print(f"\n  ! Could not clone {repo_slug}: {e}\n")
+        return None
 
     return local_path
 
@@ -267,6 +277,8 @@ def ingest(repos: list[str] | None = None) -> dict:
 
     for repo_slug in repos:
         repo_path = clone_or_pull(repo_slug)
+        if repo_path is None:
+            continue
         chunks = collect_chunks(repo_slug, repo_path)
         all_chunks.extend(chunks)
 
