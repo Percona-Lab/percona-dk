@@ -59,10 +59,8 @@ inject_mcp_config() {
     echo '{}' > "$config_file"
   fi
 
-  # Use Python's json module to merge the MCP config safely
   "$python_bin" - "$config_file" "$dotenv_path" <<'PYEOF'
-import json
-import sys
+import json, sys
 
 config_file = sys.argv[1]
 dotenv_path = sys.argv[2]
@@ -86,7 +84,7 @@ with open(config_file, "w") as f:
 PYEOF
 }
 
-# ── Install uv (Python package manager) ──────────────────────
+# ── Install uv ────────────────────────────────────────────────
 
 install_uv() {
   if command -v uv &>/dev/null; then
@@ -132,6 +130,52 @@ check_git() {
     *) fail "Install Git from https://git-scm.com" ;;
   esac
   ok "Git installed"
+}
+
+# ── Live repo size estimate from GitHub ──────────────────────
+
+# Fetches .md file count for a repo via GitHub trees API and returns
+# a human-readable estimate string like "84 docs, ~1 min".
+# Falls back to "?" if the API is unreachable.
+fetch_repo_estimate() {
+  local slug="$1"
+  local owner="${slug%%/*}"
+  local repo="${slug##*/}"
+
+  local result
+  result=$(curl -sf --max-time 5 \
+    "https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1" \
+    2>/dev/null) || { echo "?"; return; }
+
+  "$PYTHON_BIN" - "$result" <<'PYEOF'
+import json, sys, math
+
+try:
+    data = json.loads(sys.argv[1])
+    md_count = sum(1 for f in data.get("tree", []) if f["path"].endswith(".md"))
+    est_min = max(1, math.ceil(md_count * 7.5 / 1000))
+    print(f"{md_count} docs, ~{est_min} min")
+except Exception:
+    print("?")
+PYEOF
+}
+
+# Preload estimates for all repos before showing prompts
+# (runs in parallel to avoid sequential delay)
+preload_estimates() {
+  local slugs=("$@")
+  for slug in "${slugs[@]}"; do
+    local key="${slug//\//_}"
+    local est
+    est=$(fetch_repo_estimate "$slug")
+    eval "REPO_EST_${key}=\"${est}\""
+  done
+}
+
+get_estimate() {
+  local slug="$1"
+  local key="${slug//\//_}"
+  eval "echo \"\${REPO_EST_${key}:-?}\""
 }
 
 # ── Detect Claude config paths (OS-aware) ────────────────────
@@ -201,39 +245,89 @@ echo ""
 DOTENV_PATH="$INSTALL_DIR/.env"
 [ ! -f "$DOTENV_PATH" ] && cp "$INSTALL_DIR/.env.example" "$DOTENV_PATH"
 
-# ── Choose repos ──────────────────────────────────────────────
+# ── Preload live repo estimates ───────────────────────────────
+
+ALL_REPO_SLUGS=(
+  percona/psmysql-docs percona/pxc-docs percona/pxb-docs percona/pmm-doc
+  percona/psmdb-docs percona/pbm-docs percona/k8spsmdb-docs
+  percona/postgresql-docs percona/k8sppg-docs
+  percona/percona-toolkit-doc percona/everest-doc
+  percona/proxysql-admin-tool-doc percona/k8sps-docs percona/k8spxc-docs
+)
+
+echo -e "${BOLD}Fetching repo info from GitHub...${NC}"
+echo ""
+preload_estimates "${ALL_REPO_SLUGS[@]}"
+ok "Repo info ready"
+echo ""
+
+# ── Choose repos by stack ─────────────────────────────────────
 
 echo -e "${BOLD}Choose documentation repos to index${NC}"
 echo ""
 info "Select the Percona products you work with."
-info "You can add more later by editing $DOTENV_PATH and re-running percona-dk-ingest."
+info "Times are approximate on Apple Silicon — Linux may be slower."
+info "You can add more repos later by editing $DOTENV_PATH"
+info "and running percona-dk-ingest."
 echo ""
 
-# Repo slug | display name | default (y/n)
-REPO_LIST=(
-  "percona/psmysql-docs|Percona Server for MySQL|y"
-  "percona/pxc-docs|XtraDB Cluster (PXC)|y"
-  "percona/pxb-docs|XtraBackup|y"
-  "percona/pmm-doc|Percona Monitoring and Management (PMM)|y"
-  "percona/psmdb-docs|Percona Server for MongoDB|n"
-  "percona/postgresql-docs|Percona Distribution for PostgreSQL|n"
-  "percona/percona-toolkit-doc|Percona Toolkit|n"
-  "percona/k8sps-docs|Kubernetes Operator for MySQL|n"
-  "percona/k8spxc-docs|Kubernetes Operator for PXC|n"
-  "percona/k8spsmdb-docs|Kubernetes Operator for MongoDB|n"
-  "percona/k8sppg-docs|Kubernetes Operator for PostgreSQL|n"
-  "percona/everest-doc|Percona Everest|n"
-  "percona/pbm-docs|Percona Backup for MongoDB|n"
-  "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool|n"
-)
-
 SELECTED_REPOS=()
-for entry in "${REPO_LIST[@]}"; do
-  slug="${entry%%|*}"
-  rest="${entry#*|}"
-  name="${rest%%|*}"
-  default="${rest##*|}"
-  if confirm "Index $name?" "$default"; then
+
+# format: "slug|display name|default"
+
+echo -e "  ${BOLD}MySQL stack${NC}"
+for entry in \
+  "percona/psmysql-docs|Percona Server for MySQL|y" \
+  "percona/pxc-docs|XtraDB Cluster|y" \
+  "percona/pxb-docs|XtraBackup|y" \
+  "percona/pmm-doc|PMM (Percona Monitoring and Management)|y"
+do
+  slug="${entry%%|*}"; rest="${entry#*|}"; name="${rest%%|*}"; default="${rest##*|}"
+  est=$(get_estimate "$slug")
+  if confirm "  Index $name? ($est)" "$default"; then
+    SELECTED_REPOS+=("$slug")
+  fi
+done
+
+echo ""
+echo -e "  ${BOLD}MongoDB stack${NC}"
+for entry in \
+  "percona/psmdb-docs|Percona Server for MongoDB|n" \
+  "percona/pbm-docs|Percona Backup for MongoDB|n" \
+  "percona/k8spsmdb-docs|Kubernetes Operator for MongoDB|n"
+do
+  slug="${entry%%|*}"; rest="${entry#*|}"; name="${rest%%|*}"; default="${rest##*|}"
+  est=$(get_estimate "$slug")
+  if confirm "  Index $name? ($est)" "$default"; then
+    SELECTED_REPOS+=("$slug")
+  fi
+done
+
+echo ""
+echo -e "  ${BOLD}PostgreSQL stack${NC}"
+for entry in \
+  "percona/postgresql-docs|Percona Distribution for PostgreSQL|n" \
+  "percona/k8sppg-docs|Kubernetes Operator for PostgreSQL|n"
+do
+  slug="${entry%%|*}"; rest="${entry#*|}"; name="${rest%%|*}"; default="${rest##*|}"
+  est=$(get_estimate "$slug")
+  if confirm "  Index $name? ($est)" "$default"; then
+    SELECTED_REPOS+=("$slug")
+  fi
+done
+
+echo ""
+echo -e "  ${BOLD}Platform and Tools${NC}"
+for entry in \
+  "percona/percona-toolkit-doc|Percona Toolkit|n" \
+  "percona/everest-doc|Percona Everest (DBaaS)|n" \
+  "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool|n" \
+  "percona/k8sps-docs|Kubernetes Operator for MySQL|n" \
+  "percona/k8spxc-docs|Kubernetes Operator for PXC|n"
+do
+  slug="${entry%%|*}"; rest="${entry#*|}"; name="${rest%%|*}"; default="${rest##*|}"
+  est=$(get_estimate "$slug")
+  if confirm "  Index $name? ($est)" "$default"; then
     SELECTED_REPOS+=("$slug")
   fi
 done
@@ -254,8 +348,8 @@ echo ""
 
 echo -e "${BOLD}Auto-sync frequency${NC}"
 echo ""
-info "Percona DK re-indexes docs automatically in the background when"
-info "the MCP server starts and the data is older than the threshold."
+info "Percona DK re-indexes docs automatically in the background when the"
+info "MCP server starts and the data is older than the configured threshold."
 echo ""
 
 REFRESH_DAYS=$(ask "Re-index docs every N days (0 to disable)" "7")
@@ -272,7 +366,7 @@ repos    = sys.argv[2]
 refresh  = sys.argv[3]
 
 text = env_path.read_text()
-text = re.sub(r"^REPOS=.*",        f"REPOS={repos}",        text, flags=re.MULTILINE)
+text = re.sub(r"^REPOS=.*",        f"REPOS={repos}",         text, flags=re.MULTILINE)
 text = re.sub(r"^REFRESH_DAYS=.*", f"REFRESH_DAYS={refresh}", text, flags=re.MULTILINE)
 env_path.write_text(text)
 PYEOF
@@ -287,7 +381,6 @@ echo ""
 
 WIRED_ANYTHING=false
 
-# Claude Desktop
 CLAUDE_DESKTOP_CONFIG=$(detect_claude_desktop_config)
 if [ -n "$CLAUDE_DESKTOP_CONFIG" ]; then
   if [ -d "$(dirname "$CLAUDE_DESKTOP_CONFIG")" ] || confirm "Configure Claude Desktop?" "y"; then
@@ -297,7 +390,6 @@ if [ -n "$CLAUDE_DESKTOP_CONFIG" ]; then
   fi
 fi
 
-# Claude Code (~/.claude/settings.json — same path on all platforms)
 CLAUDE_CODE_CONFIG="$HOME/.claude/settings.json"
 if [ -f "$CLAUDE_CODE_CONFIG" ] || confirm "Configure Claude Code (CLI)?" "y"; then
   inject_mcp_config "$CLAUDE_CODE_CONFIG" "$PYTHON_BIN" "$DOTENV_PATH"
@@ -309,10 +401,19 @@ echo ""
 
 # ── Run initial ingestion ─────────────────────────────────────
 
+# Sum live per-repo estimates for the total
+REPO_COUNT=${#SELECTED_REPOS[@]}
+EST_TOTAL=0
+for slug in "${SELECTED_REPOS[@]}"; do
+  est=$(get_estimate "$slug")
+  mins=$(echo "$est" | "$PYTHON_BIN" -c "import sys,re; m=re.search(r'~(\d+) min',sys.stdin.read()); print(m.group(1) if m else 1)")
+  EST_TOTAL=$((EST_TOTAL + mins))
+done
+
 echo -e "${BOLD}Indexing documentation...${NC}"
 echo ""
-info "Downloads selected repos and builds a local semantic search index."
-info "May take a few minutes depending on the number of repos selected."
+info "Downloads and indexes ${REPO_COUNT} repo(s) — roughly ${EST_TOTAL}+ min on Apple Silicon."
+info "This runs once now; future updates happen automatically in the background."
 echo ""
 
 if confirm "Run initial ingestion now?" "y"; then
