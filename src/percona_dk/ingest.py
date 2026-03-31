@@ -8,6 +8,7 @@ ChromaDB handles embedding locally via its default model (all-MiniLM-L6-v2).
 
 import os
 import re
+import sys
 import hashlib
 import logging
 from pathlib import Path
@@ -46,6 +47,16 @@ COLLECTION_NAME = "percona_docs"
 DEFAULT_REPOS = [r.strip() for r in os.getenv("REPOS", "percona/psmysql-docs").split(",") if r.strip()]
 
 MAX_CHUNK_CHARS = 4000  # rough limit to stay within token budget
+
+_INTERACTIVE = sys.stdout.isatty()
+
+
+def _bar(current: int, total: int, width: int = 35) -> str:
+    filled = int(width * current / total) if total else width
+    filled = min(filled, width)
+    bar = "=" * filled + (">" if filled < width else "") + " " * (width - filled - (1 if filled < width else 0))
+    pct = int(100 * current / total) if total else 100
+    return f"[{bar}] {pct:3d}%  {current}/{total}"
 
 
 # ---------------------------------------------------------------------------
@@ -252,16 +263,32 @@ def load_into_chroma(chunks: list[dict]) -> chromadb.Collection:
 
     # Upsert in batches — ChromaDB embeds documents automatically
     batch_size = 500  # smaller batches since local embedding is CPU-bound
-    for i in range(0, len(ids), batch_size):
-        end = i + batch_size
-        log.info("Embedding + upserting batch %d–%d of %d", i, min(end, len(ids)), len(ids))
+    total = len(ids)
+    first = True
+    for i in range(0, total, batch_size):
+        end = min(i + batch_size, total)
+        if _INTERACTIVE:
+            current_repo = metadatas[i].get("source_repo", "")
+            if not first:
+                # Move up 2 lines and clear them
+                print("\033[2A\033[2K", end="", flush=True)
+            print(f"  {_bar(end, total)}", flush=True)
+            print(f"  \033[2m{current_repo}\033[0m", flush=True)
+            first = False
+        else:
+            log.info("Embedding + upserting batch %d–%d of %d", i, end, total)
         collection.upsert(
             ids=ids[i:end],
             documents=documents[i:end],
             metadatas=metadatas[i:end],
         )
 
-    log.info("ChromaDB collection '%s' now has %d documents", COLLECTION_NAME, collection.count())
+    if _INTERACTIVE:
+        print("\033[2A\033[2K", end="", flush=True)
+        print(f"  {_bar(total, total)}  done", flush=True)
+        print(f"  \033[2m{total} chunks indexed\033[0m", flush=True)
+    else:
+        log.info("ChromaDB collection '%s' now has %d documents", COLLECTION_NAME, collection.count())
     return collection
 
 
@@ -274,19 +301,27 @@ def ingest(repos: list[str] | None = None) -> dict:
     repos = repos or DEFAULT_REPOS
 
     all_chunks: list[dict] = []
+    total_repos = len(repos)
 
-    for repo_slug in repos:
+    for idx, repo_slug in enumerate(repos, 1):
+        if _INTERACTIVE:
+            print(f"  [{idx}/{total_repos}] {repo_slug} ...", flush=True)
         repo_path = clone_or_pull(repo_slug)
         if repo_path is None:
             continue
         chunks = collect_chunks(repo_slug, repo_path)
         all_chunks.extend(chunks)
+        if _INTERACTIVE:
+            print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  ({len(chunks)} chunks)", flush=True)
 
     if not all_chunks:
         log.warning("No chunks collected — nothing to embed.")
         return {"repos": repos, "chunks": 0}
 
-    log.info("Total chunks to embed: %d", len(all_chunks))
+    if _INTERACTIVE:
+        print(f"\n  Embedding {len(all_chunks)} chunks...", flush=True)
+    else:
+        log.info("Total chunks to embed: %d", len(all_chunks))
 
     # Load into ChromaDB (embeddings generated locally by ChromaDB)
     collection = load_into_chroma(all_chunks)
