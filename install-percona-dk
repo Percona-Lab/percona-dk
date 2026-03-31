@@ -285,108 +285,116 @@ echo ""
 
 # ── Choose repos by stack ─────────────────────────────────────
 
+# Returns 0 (true) if slug is in EXISTING_REPOS
+is_configured() {
+  [[ ",$EXISTING_REPOS," == *",$1,"* ]]
+}
+
 if [ "$IS_UPDATE" = true ] && [ -n "$EXISTING_REPOS" ]; then
   echo -e "${BOLD}Configured repos${NC}"
   echo ""
-  info "Current: $EXISTING_REPOS"
+  # Pretty-print current repos one per line
+  echo "$EXISTING_REPOS" | tr ',' '\n' | while read -r r; do
+    [ -n "$r" ] && info "  $r"
+  done
   echo ""
-  if ! confirm "Change repo selection?" "n"; then
-    REPOS_VALUE="$EXISTING_REPOS"
-    SKIP_REPO_SELECT=true
-  fi
+  info "Already-indexed repos default to Y. New repos default to N."
   echo ""
 fi
 
-if [ "${SKIP_REPO_SELECT:-false}" = false ]; then
-  echo -e "${BOLD}Choose documentation repos to index${NC}"
-  echo ""
-  info "Select the Percona products you work with."
-  info "Times are approximate on Apple Silicon — Linux may be slower."
-  info "You can add more repos later by editing $DOTENV_PATH"
-  info "and running percona-dk-ingest."
-  echo ""
+echo -e "${BOLD}Choose documentation repos to index${NC}"
+echo ""
+info "Select the Percona products you work with."
+info "Times are approximate on Apple Silicon — Linux may be slower."
+echo ""
 
-  SELECTED_REPOS=()
+SELECTED_REPOS=()
 
-  # Helper: prompt for a whole stack or individual repos
-  # Usage: select_stack "Stack name" "slug1|Name1|default1" "slug2|Name2|default2" ...
-  select_stack() {
-    local stack_name="$1"
-    shift
-    local entries=("$@")
+# Helper: prompt for a whole stack or individual repos.
+# Per-repo default is Y if already in EXISTING_REPOS, else the hardcoded default.
+# Stack-level "yes to all" defaults to Y only if every repo in the stack is configured.
+select_stack() {
+  local stack_name="$1"
+  shift
+  local entries=("$@")
 
-    # Calculate stack total estimate
-    local stack_total=0
-    local stack_est_str=""
+  # Calculate stack total estimate and check if all are already configured
+  local stack_total=0
+  local all_configured=true
+  for entry in "${entries[@]}"; do
+    local slug="${entry%%|*}"
+    local est
+    est=$(get_estimate "$slug")
+    local mins
+    mins=$(_est_mins "$est")
+    stack_total=$((stack_total + mins))
+    is_configured "$slug" || all_configured=false
+  done
+
+  local stack_default="n"
+  $all_configured && stack_default="y"
+
+  echo -e "  ${BOLD}${stack_name}${NC} ${DIM}(~${stack_total} min total)${NC}"
+
+  if confirm "  Index entire ${stack_name}?" "$stack_default"; then
     for entry in "${entries[@]}"; do
       local slug="${entry%%|*}"
+      local rest="${entry#*|}"
+      local name="${rest%%|*}"
       local est
       est=$(get_estimate "$slug")
-      local mins
-      mins=$(_est_mins "$est")
-      stack_total=$((stack_total + mins))
+      ok "  $name ($est)"
+      SELECTED_REPOS+=("$slug")
     done
-    stack_est_str="~${stack_total} min total"
-
-    echo -e "  ${BOLD}${stack_name}${NC} ${DIM}(${stack_est_str})${NC}"
-
-    if confirm "  Index entire ${stack_name}?" "y"; then
-      for entry in "${entries[@]}"; do
-        local slug="${entry%%|*}"
-        local rest="${entry#*|}"
-        local name="${rest%%|*}"
-        local est
-        est=$(get_estimate "$slug")
-        ok "  $name ($est)"
+  else
+    for entry in "${entries[@]}"; do
+      local slug="${entry%%|*}"
+      local rest="${entry#*|}"
+      local name="${rest%%|*}"
+      local hardcoded_default="${rest##*|}"
+      local est
+      est=$(get_estimate "$slug")
+      # Already configured repos default to Y; new repos use hardcoded default
+      local repo_default="$hardcoded_default"
+      is_configured "$slug" && repo_default="y"
+      if confirm "    Index $name? ($est)" "$repo_default"; then
         SELECTED_REPOS+=("$slug")
-      done
-    else
-      for entry in "${entries[@]}"; do
-        local slug="${entry%%|*}"
-        local rest="${entry#*|}"
-        local name="${rest%%|*}"
-        local default="${rest##*|}"
-        local est
-        est=$(get_estimate "$slug")
-        if confirm "    Index $name? ($est)" "$default"; then
-          SELECTED_REPOS+=("$slug")
-        fi
-      done
-    fi
-    echo ""
-  }
-
-  select_stack "MySQL stack" \
-    "percona/psmysql-docs|Percona Server for MySQL|y" \
-    "percona/pxc-docs|XtraDB Cluster|y" \
-    "percona/pxb-docs|XtraBackup|y" \
-    "percona/pmm-doc|PMM (Percona Monitoring and Management)|y"
-
-  select_stack "MongoDB stack" \
-    "percona/psmdb-docs|Percona Server for MongoDB|n" \
-    "percona/pbm-docs|Percona Backup for MongoDB|n" \
-    "percona/k8spsmdb-docs|Kubernetes Operator for MongoDB|n"
-
-  select_stack "PostgreSQL stack" \
-    "percona/postgresql-docs|Percona Distribution for PostgreSQL|n" \
-    "percona/k8sppg-docs|Kubernetes Operator for PostgreSQL|n"
-
-  select_stack "Platform and Tools" \
-    "percona/percona-toolkit-doc|Percona Toolkit|n" \
-    "percona/everest-doc|Percona Everest (DBaaS)|n" \
-    "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool|n" \
-    "percona/k8sps-docs|Kubernetes Operator for MySQL|n" \
-    "percona/k8spxc-docs|Kubernetes Operator for PXC|n"
-
-  if [ ${#SELECTED_REPOS[@]} -eq 0 ]; then
-    warn "No repos selected — defaulting to percona/psmysql-docs"
-    SELECTED_REPOS=("percona/psmysql-docs")
+      fi
+    done
   fi
-
-  REPOS_VALUE=$(IFS=,; echo "${SELECTED_REPOS[*]}")
-  ok "${#SELECTED_REPOS[@]} repo(s) selected"
   echo ""
+}
+
+select_stack "MySQL stack" \
+  "percona/psmysql-docs|Percona Server for MySQL|y" \
+  "percona/pxc-docs|XtraDB Cluster|y" \
+  "percona/pxb-docs|XtraBackup|y" \
+  "percona/pmm-doc|PMM (Percona Monitoring and Management)|y"
+
+select_stack "MongoDB stack" \
+  "percona/psmdb-docs|Percona Server for MongoDB|n" \
+  "percona/pbm-docs|Percona Backup for MongoDB|n" \
+  "percona/k8spsmdb-docs|Kubernetes Operator for MongoDB|n"
+
+select_stack "PostgreSQL stack" \
+  "percona/postgresql-docs|Percona Distribution for PostgreSQL|n" \
+  "percona/k8sppg-docs|Kubernetes Operator for PostgreSQL|n"
+
+select_stack "Platform and Tools" \
+  "percona/percona-toolkit-doc|Percona Toolkit|n" \
+  "percona/everest-doc|Percona Everest (DBaaS)|n" \
+  "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool|n" \
+  "percona/k8sps-docs|Kubernetes Operator for MySQL|n" \
+  "percona/k8spxc-docs|Kubernetes Operator for PXC|n"
+
+if [ ${#SELECTED_REPOS[@]} -eq 0 ]; then
+  warn "No repos selected — defaulting to percona/psmysql-docs"
+  SELECTED_REPOS=("percona/psmysql-docs")
 fi
+
+REPOS_VALUE=$(IFS=,; echo "${SELECTED_REPOS[*]}")
+ok "${#SELECTED_REPOS[@]} repo(s) selected"
+echo ""
 
 # ── Choose sync frequency ─────────────────────────────────────
 
