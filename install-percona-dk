@@ -258,7 +258,7 @@ echo -e "${BOLD}Setting up Python environment...${NC}"
 echo ""
 
 VENV_DIR="$INSTALL_DIR/.venv"
-uv venv "$VENV_DIR" --python 3.12 --quiet
+uv venv "$VENV_DIR" --python 3.12 --clear --quiet
 ok "Virtual environment ready (Python 3.12)"
 
 uv pip install --quiet -e "$INSTALL_DIR" --python "$VENV_DIR/bin/python"
