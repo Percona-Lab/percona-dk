@@ -61,11 +61,6 @@ KNOWN_REPOS: dict[str, list[str]] = {
         "operator for postgresql", "k8s postgresql", "kubernetes postgresql",
         "k8spg", "ppg operator", "percona operator postgresql",
     ],
-    "percona/percona-toolkit-doc": [
-        "pt-online-schema-change", "pt-query-digest", "pt-table-checksum",
-        "pt-table-sync", "pt-archiver", "pt-kill", "pt-stalk",
-        "pt-summary", "pt-mysql-summary", "percona toolkit", "pt-",
-    ],
     "percona/everest-doc": [
         "everest", "percona everest", "dbaas", "database as a service",
     ],

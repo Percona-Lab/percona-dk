@@ -283,7 +283,7 @@ ALL_REPO_SLUGS=(
   percona/psmdb-docs percona/pbm-docs
   percona/postgresql-docs
   percona/k8sps-docs percona/k8spxc-docs percona/k8spsmdb-docs percona/k8spg-docs
-  percona/percona-toolkit-doc percona/proxysql-admin-tool-doc
+  percona/proxysql-admin-tool-doc
 )
 
 echo -e "${BOLD}Fetching repo info from GitHub...${NC}"
@@ -397,7 +397,6 @@ while true; do
     "percona/k8spg-docs|Operator for PostgreSQL"
 
   select_stack "Tools" \
-    "percona/percona-toolkit-doc|Percona Toolkit" \
     "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool"
 
   if [ ${#SELECTED_REPOS[@]} -eq 0 ]; then

@@ -82,7 +82,6 @@ The installer lets you choose which stacks to index. All repos are public Percon
 | **Kubernetes Operators** | `percona/k8spxc-docs` | Operator for PXC |
 | **Kubernetes Operators** | `percona/k8spsmdb-docs` | Operator for MongoDB |
 | **Kubernetes Operators** | `percona/k8sppg-docs` | Operator for PostgreSQL |
-| **Tools** | `percona/percona-toolkit-doc` | Percona Toolkit |
 | **Tools** | `percona/proxysql-admin-tool-doc` | ProxySQL Admin Tool |
 
 The MySQL stack and Tools are indexed by default. MongoDB, PostgreSQL, and Kubernetes Operators are opt-in during installation.
