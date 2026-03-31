@@ -43,6 +43,30 @@ if platform.system() == "Windows":
 # ---------------------------------------------------------------------------
 # Repo definitions
 # ---------------------------------------------------------------------------
+REPO_NAMES: dict[str, str] = {
+    "percona/psmysql-docs": "Percona Server for MySQL",
+    "percona/pxc-docs": "Percona XtraDB Cluster",
+    "percona/pxb-docs": "Percona XtraBackup",
+    "percona/pdmysql-docs": "Percona Distribution for MySQL",
+    "percona/ps-binlog-server-docs": "Percona Binlog Server",
+    "percona/pmm-doc": "Percona Monitoring and Management",
+    "percona/psmdb-docs": "Percona Server for MongoDB",
+    "percona/pbm-docs": "Percona Backup for MongoDB",
+    "percona/pcsm-docs": "Percona ClusterSync for MongoDB",
+    "percona/postgresql-docs": "Percona Distribution for PostgreSQL",
+    "percona/pg_tde": "pg_tde (Transparent Data Encryption)",
+    "percona/pgsm-docs": "pg_stat_monitor",
+    "percona/k8sps-docs": "Operator for MySQL",
+    "percona/k8spxc-docs": "Operator for PXC",
+    "percona/k8spsmdb-docs": "Operator for MongoDB",
+    "percona/k8spg-docs": "Operator for PostgreSQL",
+    "openeverest/everest-doc": "OpenEverest DBaaS Platform",
+    "percona/proxysql-admin-tool-doc": "ProxySQL Admin Tool",
+    "percona/percona-toolkit": "Percona Toolkit",
+    "percona/pmm_dump_docs": "PMM Dump",
+    "percona/repo-config-docs": "Percona Software Repositories",
+}
+
 STACKS = [
     {
         "name": "MySQL stack",
@@ -445,8 +469,8 @@ def select_repos(md_counts: dict, existing_repos: list) -> list:
             est = time_estimate(count)
             if count is not None:
                 total_docs += count
-            short = slug.split("/")[1]
-            print(f"    {DIM}{slug:<40}{NC}  {count_str} docs, {est}")
+            name = REPO_NAMES.get(slug, slug.split("/")[1])
+            print(f"    {name:<42} {DIM}{slug:<40}{NC}  {count_str} docs, {est}")
         print()
         total_mins = max(1, math.ceil(total_docs * 7.5 / 1000))
         disk_mb = total_docs // 2
@@ -486,10 +510,8 @@ def _run_selection(md_counts: dict, existing_repos: list) -> list:
                 count = md_counts.get(repo)
                 count_str = str(count) if count is not None else "?"
                 est = time_estimate(count)
-                short = repo.split("/")[1]
-                # Default to Y if repo was previously selected, else N
-                was_selected = repo in existing_repos
-                yn = ask_yn(f"  Include {short} ({count_str} docs, {est})?", default=was_selected)
+                name = REPO_NAMES.get(repo, repo.split("/")[1])
+                yn = ask_yn(f"  Include {name} ({count_str} docs, {est})?", default=True)
                 if yn:
                     selected.append(repo)
         else:
@@ -544,23 +566,6 @@ def write_env(install_dir: Path, selected_repos: list, refresh_days: int) -> Non
 # Step 11: AI client configuration
 # ---------------------------------------------------------------------------
 
-def get_claude_desktop_config_path() -> Path | None:
-    system = platform.system()
-    if system == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-    elif system == "Linux":
-        return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
-    elif system == "Windows":
-        appdata = os.environ.get("APPDATA", "")
-        if appdata:
-            return Path(appdata) / "Claude" / "claude_desktop_config.json"
-    return None
-
-
-def get_claude_code_config_path() -> Path:
-    return Path.home() / ".claude" / "settings.json"
-
-
 def build_mcp_entry(install_dir: Path) -> dict:
     venv = install_dir / ".venv"
     py = python_in_venv(venv)
@@ -572,40 +577,14 @@ def build_mcp_entry(install_dir: Path) -> dict:
     }
 
 
-def configure_claude_desktop(config_path: Path, install_dir: Path) -> bool:
-    """Configure Claude Desktop. Returns True if configured."""
-    if not config_path.parent.exists():
-        if not ask_yn(
-            f"Claude Desktop config dir not found at {config_path.parent}.\n  Configure anyway?",
-            default=False,
-        ):
+def _configure_mcp_client(name: str, config_path: Path, install_dir: Path, detected: bool) -> bool:
+    """Configure an MCP client. Returns True if configured."""
+    if not detected:
+        print(f"  {DIM}{name} not detected ({config_path.parent}){NC}")
+        if not ask_yn(f"Configure {name} MCP anyway?", default=False):
             return False
-        config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Load existing config or start fresh
-    config = {}
-    if config_path.exists():
-        try:
-            config = json.loads(config_path.read_text())
-        except json.JSONDecodeError:
-            warn(f"Could not parse {config_path} - will overwrite.")
-
-    config.setdefault("mcpServers", {})
-    config["mcpServers"]["percona-dk"] = build_mcp_entry(install_dir)
-
-    config_path.write_text(json.dumps(config, indent=2) + "\n")
-    info(f"Configured Claude Desktop: {config_path}")
-    return True
-
-
-def configure_claude_code(config_path: Path, install_dir: Path) -> bool:
-    """Configure Claude Code (settings.json). Returns True if configured."""
     if not config_path.parent.exists():
-        if not ask_yn(
-            f"Claude Code config dir not found at {config_path.parent}.\n  Configure anyway?",
-            default=False,
-        ):
-            return False
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
     config = {}
@@ -619,39 +598,63 @@ def configure_claude_code(config_path: Path, install_dir: Path) -> bool:
     config["mcpServers"]["percona-dk"] = build_mcp_entry(install_dir)
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
-    info(f"Configured Claude Code: {config_path}")
+    info(f"Configured {name}: {config_path}")
     return True
+
+
+def _get_ai_clients() -> list[dict]:
+    """Return list of known AI clients with their config paths."""
+    system = platform.system()
+    home = Path.home()
+
+    clients = []
+
+    # Claude Desktop
+    if system == "Darwin":
+        desktop_path = home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    elif system == "Linux":
+        desktop_path = home / ".config" / "Claude" / "claude_desktop_config.json"
+    elif system == "Windows":
+        appdata = os.environ.get("APPDATA", "")
+        desktop_path = Path(appdata) / "Claude" / "claude_desktop_config.json" if appdata else None
+    else:
+        desktop_path = None
+    if desktop_path:
+        clients.append({"name": "Claude Desktop", "path": desktop_path})
+
+    # Claude Code
+    clients.append({"name": "Claude Code", "path": home / ".claude" / "settings.json"})
+
+    # Cursor
+    clients.append({"name": "Cursor", "path": home / ".cursor" / "mcp.json"})
+
+    # Windsurf
+    clients.append({"name": "Windsurf", "path": home / ".codeium" / "windsurf" / "mcp_config.json"})
+
+    return clients
 
 
 def configure_ai_clients(install_dir: Path) -> bool:
     """Configure all detected AI clients. Returns True if any were configured."""
     print(c(BOLD, "Configuring AI clients..."))
     any_configured = False
+    configured_names = []
 
-    # Claude Desktop
-    desktop_path = get_claude_desktop_config_path()
-    if desktop_path is not None:
-        if desktop_path.parent.exists():
-            info("Claude Desktop detected - auto-configuring...")
-            if configure_claude_desktop(desktop_path, install_dir):
-                any_configured = True
-        else:
-            print(f"  {DIM}Claude Desktop not detected ({desktop_path.parent}){NC}")
-            if ask_yn("Configure Claude Desktop MCP anyway?", default=False):
-                if configure_claude_desktop(desktop_path, install_dir):
-                    any_configured = True
+    for client in _get_ai_clients():
+        name = client["name"]
+        config_path = client["path"]
+        detected = config_path.parent.exists()
 
-    # Claude Code
-    code_path = get_claude_code_config_path()
-    if code_path.parent.exists():
-        info("Claude Code detected - auto-configuring...")
-        if configure_claude_code(code_path, install_dir):
+        if detected:
+            info(f"{name} detected - auto-configuring...")
+
+        if _configure_mcp_client(name, config_path, install_dir, detected):
             any_configured = True
-    else:
-        print(f"  {DIM}Claude Code not detected ({code_path.parent}){NC}")
-        if ask_yn("Configure Claude Code MCP anyway?", default=False):
-            if configure_claude_code(code_path, install_dir):
-                any_configured = True
+            configured_names.append(name)
+
+    if configured_names:
+        print()
+        info(f"Percona DK is ready to use in: {', '.join(configured_names)}")
 
     print()
     return any_configured
