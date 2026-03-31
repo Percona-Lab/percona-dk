@@ -87,6 +87,23 @@ ALL_REPOS = [repo for stack in STACKS for repo in stack["repos"]]
 
 REPO_URL = "https://github.com/Percona-Lab/percona-dk.git"
 
+# Approximate .md file counts used as fallback when the GitHub API is unavailable.
+# Updated periodically - good enough for time/disk estimates.
+FALLBACK_MD_COUNTS: dict[str, int] = {
+    "percona/psmysql-docs": 249,
+    "percona/pxc-docs": 80,
+    "percona/pxb-docs": 115,
+    "percona/pmm-doc": 228,
+    "percona/psmdb-docs": 75,
+    "percona/pbm-docs": 147,
+    "percona/postgresql-docs": 69,
+    "percona/k8sps-docs": 84,
+    "percona/k8spxc-docs": 144,
+    "percona/k8spsmdb-docs": 175,
+    "percona/k8spg-docs": 121,
+    "percona/proxysql-admin-tool-doc": 62,
+}
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -362,12 +379,13 @@ def fetch_all_md_counts() -> dict:
         t.join()
 
     if rate_limited:
-        print(f"\n  {YELLOW}GitHub API rate limit reached (60 req/hour for unauthenticated requests).{NC}")
-        print(f"  {DIM}Size estimates are unavailable but installation will proceed normally.{NC}")
-        print(f"  {DIM}The rate limit resets after an hour, or set GITHUB_TOKEN in your environment.{NC}\n")
-    elif any(v is None for v in results.values()):
-        failed = [slug for slug, v in results.items() if v is None]
-        warn(f"Could not fetch sizes for: {', '.join(failed)}")
+        print(f"  {YELLOW}GitHub API rate limit reached - using approximate estimates.{NC}")
+        print(f"  {DIM}Set GITHUB_TOKEN in your environment for live counts.{NC}")
+
+    # Fill in fallback counts for any repos that failed
+    for slug in ALL_REPOS:
+        if results.get(slug) is None:
+            results[slug] = FALLBACK_MD_COUNTS.get(slug)
 
     print()
     return results
