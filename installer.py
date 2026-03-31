@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -316,8 +317,11 @@ def fetch_md_count(repo_slug: str, results: dict, lock: threading.Lock) -> None:
     owner, repo = repo_slug.split("/", 1)
     url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
     try:
-        req = Request(url, headers={"Accept": "application/vnd.github+json"})
-        with urlopen(req, timeout=8) as resp:
+        req = Request(url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "percona-dk-installer",
+        })
+        with urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
         count = sum(
             1 for item in data.get("tree", [])
@@ -337,7 +341,9 @@ def fetch_all_md_counts() -> dict:
     lock = threading.Lock()
 
     threads = []
-    for repo_slug in ALL_REPOS:
+    for i, repo_slug in enumerate(ALL_REPOS):
+        if i > 0:
+            time.sleep(0.1)  # stagger requests to avoid GitHub rate limiting
         t = threading.Thread(target=fetch_md_count, args=(repo_slug, results, lock), daemon=True)
         t.start()
         threads.append(t)
