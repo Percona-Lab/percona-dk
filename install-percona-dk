@@ -8,6 +8,13 @@
 
 set -e
 
+# When piped from curl, bash stdin is the pipe — not the terminal.
+# Re-fetch and exec with /dev/tty as stdin so interactive prompts work.
+SCRIPT_URL="https://raw.githubusercontent.com/Percona-Lab/percona-dk/main/install-percona-dk"
+if [ ! -t 0 ]; then
+  exec bash <(curl -fsSL "$SCRIPT_URL") </dev/tty
+fi
+
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
