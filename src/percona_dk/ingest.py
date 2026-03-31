@@ -4,8 +4,12 @@ Percona Developer Knowledge — Ingestion Pipeline
 Clones Percona doc repos from GitHub, parses Markdown source files,
 chunks by h2/h3 headings, and loads into ChromaDB for semantic search.
 ChromaDB handles embedding locally via its default model (all-MiniLM-L6-v2).
+
+Supports incremental re-ingestion: on subsequent runs, only files whose
+content changed since the last ingest are re-chunked and re-embedded.
 """
 
+import json
 import os
 import re
 import sys
@@ -43,6 +47,7 @@ DATA_DIR = (_env_dir / _data_path).resolve() if not _data_path.is_absolute() els
 REPOS_DIR = DATA_DIR / "repos"
 CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
+FILES_MARKER = DATA_DIR / ".last_ingest_files.json"
 
 DEFAULT_REPOS = [r.strip() for r in os.getenv("REPOS", "percona/psmysql-docs").split(",") if r.strip()]
 
@@ -98,41 +103,23 @@ _HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
 
 
 def _build_page_url(repo_slug: str, file_path: str) -> str:
-    """Construct a docs.percona.com URL from repo slug and file path.
-
-    Pattern: the docs repos typically map
-      docs/some-page.md  →  https://docs.percona.com/<product>/latest/some-page/
-    This is a best-effort construction; exact mapping varies per repo.
-    """
-    # Strip leading docs/ directory and .md extension
+    """Construct a docs.percona.com URL from repo slug and file path."""
     rel = file_path
     for prefix in ("docs/", "source/"):
         if rel.startswith(prefix):
             rel = rel[len(prefix):]
     rel = re.sub(r"\.md$", "", rel)
-
-    # Derive product slug from repo name
     product = repo_slug.split("/")[-1].replace("-docs", "").replace("_", "-")
     return f"https://docs.percona.com/{product}/latest/{rel}/"
 
 
 def chunk_markdown(text: str, repo_slug: str, file_path: str) -> list[dict]:
-    """Split a Markdown file into chunks at h2/h3 boundaries.
-
-    Each chunk contains:
-      - text: the Markdown content of the section
-      - source_repo: e.g. "percona/percona-server-docs"
-      - file_path: relative path within the repo
-      - heading_hierarchy: list of heading strings leading to this chunk
-      - page_url: constructed docs.percona.com URL
-    """
-    # Find all headings and their positions
-    headings: list[tuple[int, int, str]] = []  # (pos, level, title)
+    """Split a Markdown file into chunks at h2/h3 boundaries."""
+    headings: list[tuple[int, int, str]] = []
     for m in _HEADING_RE.finditer(text):
         headings.append((m.start(), len(m.group(1)), m.group(2).strip()))
 
     if not headings:
-        # No headings — treat the entire file as one chunk
         stripped = text.strip()
         if not stripped:
             return []
@@ -147,24 +134,18 @@ def chunk_markdown(text: str, repo_slug: str, file_path: str) -> list[dict]:
         ]
 
     chunks: list[dict] = []
-    hierarchy: list[str] = []  # current heading stack
+    hierarchy: list[str] = []
 
     for i, (pos, level, title) in enumerate(headings):
-        # Determine the text range for this section
         start = pos
         end = headings[i + 1][0] if i + 1 < len(headings) else len(text)
         section_text = text[start:end].strip()
-
         if not section_text:
             continue
-
-        # Maintain heading hierarchy
-        # Trim hierarchy to current level, then append
         hierarchy = [h for j, h in enumerate(hierarchy) if j < level - 1]
         while len(hierarchy) < level - 1:
             hierarchy.append("")
         hierarchy = hierarchy[: level - 1] + [title]
-
         chunks.append(
             {
                 "text": section_text[:MAX_CHUNK_CHARS],
@@ -175,7 +156,6 @@ def chunk_markdown(text: str, repo_slug: str, file_path: str) -> list[dict]:
             }
         )
 
-    # If there's content before the first heading, capture it too
     pre_heading_text = text[: headings[0][0]].strip()
     if pre_heading_text:
         chunks.insert(
@@ -199,49 +179,79 @@ def chunk_markdown(text: str, repo_slug: str, file_path: str) -> list[dict]:
 def collect_chunks(repo_slug: str, repo_path: Path) -> list[dict]:
     """Walk all .md files in a repo and return chunks."""
     all_chunks: list[dict] = []
-
     md_files = sorted(repo_path.rglob("*.md"))
     log.info("Found %d .md files in %s", len(md_files), repo_slug)
-
     for md_file in md_files:
-        # Skip hidden dirs, vendor, node_modules, etc.
         rel_path = str(md_file.relative_to(repo_path))
         if any(part.startswith(".") for part in Path(rel_path).parts):
             continue
-
         text = md_file.read_text(encoding="utf-8", errors="replace")
         chunks = chunk_markdown(text, repo_slug, rel_path)
         all_chunks.extend(chunks)
-
     log.info("Collected %d chunks from %s", len(all_chunks), repo_slug)
     return all_chunks
 
 
+def _scan_file_hashes(repo_slug: str, repo_path: Path) -> dict[str, str]:
+    """Return {rel_path: sha256} for all tracked .md files in the repo."""
+    hashes = {}
+    for md_file in sorted(repo_path.rglob("*.md")):
+        rel_path = str(md_file.relative_to(repo_path))
+        if any(part.startswith(".") for part in Path(rel_path).parts):
+            continue
+        hashes[rel_path] = hashlib.sha256(md_file.read_bytes()).hexdigest()
+    return hashes
+
+
 # ---------------------------------------------------------------------------
-# ChromaDB loading (embeddings handled automatically by ChromaDB's default model)
+# ChromaDB helpers
 # ---------------------------------------------------------------------------
 
-def load_into_chroma(chunks: list[dict]) -> chromadb.Collection:
-    """Load chunks into ChromaDB. Embeddings are generated locally by ChromaDB."""
+def _get_collection(create: bool = False) -> chromadb.Collection:
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    if create:
+        return client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+    return client.get_collection(name=COLLECTION_NAME)
 
-    # Delete existing collection to do a clean reload
+
+def _delete_chunks_for_files(collection: chromadb.Collection, repo_slug: str, file_paths: list[str]) -> int:
+    """Delete all chunks belonging to specific files. Returns count deleted."""
+    total_deleted = 0
+    for file_path in file_paths:
+        try:
+            results = collection.get(
+                where={"$and": [
+                    {"source_repo": {"$eq": repo_slug}},
+                    {"file_path": {"$eq": file_path}},
+                ]}
+            )
+            if results["ids"]:
+                collection.delete(ids=results["ids"])
+                total_deleted += len(results["ids"])
+        except Exception as e:
+            log.warning("Could not delete chunks for %s:%s: %s", repo_slug, file_path, e)
+    return total_deleted
+
+
+def _delete_all_repo_chunks(collection: chromadb.Collection, repo_slug: str) -> int:
+    """Delete all chunks for a repo. Returns count deleted."""
     try:
-        client.delete_collection(COLLECTION_NAME)
-        log.info("Deleted existing collection '%s'", COLLECTION_NAME)
-    except Exception:
-        pass
+        results = collection.get(where={"source_repo": {"$eq": repo_slug}})
+        if results["ids"]:
+            collection.delete(ids=results["ids"])
+            return len(results["ids"])
+    except Exception as e:
+        log.warning("Could not delete chunks for %s: %s", repo_slug, e)
+    return 0
 
-    collection = client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
 
-    # Generate deterministic IDs from content hash, dedup
+def _upsert_chunks(collection: chromadb.Collection, chunks: list[dict], label: str = "") -> int:
+    """Upsert chunks into ChromaDB with dedup. Returns count upserted."""
     seen_ids: set[str] = set()
-    ids = []
-    documents = []
-    metadatas = []
+    ids, documents, metadatas = [], [], []
 
     for chunk in chunks:
         chunk_id = hashlib.sha256(
@@ -261,81 +271,146 @@ def load_into_chroma(chunks: list[dict]) -> chromadb.Collection:
             }
         )
 
-    # Upsert in batches — ChromaDB embeds documents automatically
-    batch_size = 500  # smaller batches since local embedding is CPU-bound
+    batch_size = 500
     total = len(ids)
     first = True
     for i in range(0, total, batch_size):
         end = min(i + batch_size, total)
         if _INTERACTIVE:
-            current_repo = metadatas[i].get("source_repo", "")
+            step = label or metadatas[i].get("source_repo", "")
             if not first:
-                # Move up 2 lines and clear them
                 print("\033[2A\033[2K", end="", flush=True)
             print(f"  {_bar(end, total)}", flush=True)
-            print(f"  \033[2m{current_repo}\033[0m", flush=True)
+            print(f"  \033[2m{step}\033[0m", flush=True)
             first = False
         else:
-            log.info("Embedding + upserting batch %d–%d of %d", i, end, total)
+            log.info("Embedding + upserting batch %d-%d of %d", i, end, total)
         collection.upsert(
             ids=ids[i:end],
             documents=documents[i:end],
             metadatas=metadatas[i:end],
         )
 
-    if _INTERACTIVE:
+    if _INTERACTIVE and total > 0:
         print("\033[2A\033[2K", end="", flush=True)
         print(f"  {_bar(total, total)}  done", flush=True)
-        print(f"  \033[2m{total} chunks indexed\033[0m", flush=True)
-    else:
-        log.info("ChromaDB collection '%s' now has %d documents", COLLECTION_NAME, collection.count())
-    return collection
+        print(f"  \033[2m{total} chunks embedded\033[0m", flush=True)
+
+    return total
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main ingestion
 # ---------------------------------------------------------------------------
 
 def ingest(repos: list[str] | None = None) -> dict:
-    """Run the full ingestion pipeline. Returns summary stats."""
+    """Run the ingestion pipeline. Uses incremental updates when possible."""
     repos = repos or DEFAULT_REPOS
-
-    all_chunks: list[dict] = []
     total_repos = len(repos)
+
+    # Load stored file hashes from last run
+    stored_hashes: dict[str, dict[str, str]] = {}
+    if FILES_MARKER.exists():
+        try:
+            stored_hashes = json.loads(FILES_MARKER.read_text())
+        except Exception:
+            pass
+
+    # Get or create ChromaDB collection
+    try:
+        collection = _get_collection(create=False)
+        collection_exists = True
+    except Exception:
+        collection = _get_collection(create=True)
+        collection_exists = False
+
+    new_hashes: dict[str, dict[str, str]] = {}
+    total_added = 0
+    total_deleted = 0
 
     for idx, repo_slug in enumerate(repos, 1):
         if _INTERACTIVE:
             print(f"  [{idx}/{total_repos}] {repo_slug} ...", flush=True)
+        else:
+            log.info("[%d/%d] Processing %s", idx, total_repos, repo_slug)
+
         repo_path = clone_or_pull(repo_slug)
         if repo_path is None:
+            if _INTERACTIVE:
+                print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  (skipped - not found)", flush=True)
             continue
-        chunks = collect_chunks(repo_slug, repo_path)
-        all_chunks.extend(chunks)
-        if _INTERACTIVE:
-            print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  ({len(chunks)} chunks)", flush=True)
 
-    if not all_chunks:
-        log.warning("No chunks collected — nothing to embed.")
-        return {"repos": repos, "chunks": 0}
+        current_hashes = _scan_file_hashes(repo_slug, repo_path)
+        new_hashes[repo_slug] = current_hashes
+        repo_stored = stored_hashes.get(repo_slug, {})
 
-    if _INTERACTIVE:
-        print(f"\n  Embedding {len(all_chunks)} chunks...", flush=True)
-    else:
-        log.info("Total chunks to embed: %d", len(all_chunks))
+        # Determine what changed
+        changed = [p for p, h in current_hashes.items() if repo_stored.get(p) != h]
+        deleted = [p for p in repo_stored if p not in current_hashes]
 
-    # Load into ChromaDB (embeddings generated locally by ChromaDB)
-    collection = load_into_chroma(all_chunks)
+        if collection_exists and repo_stored:
+            if not changed and not deleted:
+                if _INTERACTIVE:
+                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  (no changes)", flush=True)
+                else:
+                    log.info("No changes in %s", repo_slug)
+                continue
 
-    stats = {
-        "repos": repos,
-        "chunks": len(all_chunks),
-        "collection_count": collection.count(),
-    }
+            # Incremental: delete stale chunks, re-embed changed files
+            n_files = len(changed) + len(deleted)
+            if _INTERACTIVE:
+                print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  ({len(changed)} changed, {len(deleted)} deleted)", flush=True)
+            else:
+                log.info("%s: %d changed, %d deleted files", repo_slug, len(changed), len(deleted))
+
+            if deleted or changed:
+                n_del = _delete_chunks_for_files(collection, repo_slug, deleted + changed)
+                total_deleted += n_del
+
+            # Re-chunk and upsert changed files
+            chunks: list[dict] = []
+            for file_path in changed:
+                full_path = repo_path / file_path
+                if full_path.exists():
+                    text = full_path.read_text(encoding="utf-8", errors="replace")
+                    chunks.extend(chunk_markdown(text, repo_slug, file_path))
+
+            if chunks:
+                if _INTERACTIVE:
+                    print(f"\n  Embedding {len(chunks)} updated chunks ({repo_slug})...", flush=True)
+                n_added = _upsert_chunks(collection, chunks, label=repo_slug)
+                total_added += n_added
+
+        else:
+            # First time seeing this repo - full chunk and embed
+            if _INTERACTIVE:
+                print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  (new - full ingest)...", flush=True)
+            chunks = collect_chunks(repo_slug, repo_path)
+            if _INTERACTIVE:
+                print(f"\n  Embedding {len(chunks)} chunks ({repo_slug})...", flush=True)
+            if chunks:
+                n_added = _upsert_chunks(collection, chunks, label=repo_slug)
+                total_added += n_added
+                if _INTERACTIVE:
+                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  ({len(chunks)} chunks)", flush=True)
+
+    # Persist updated file hashes (merge: keep repos not in this run unchanged)
+    merged_hashes = {**stored_hashes, **new_hashes}
+    FILES_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    FILES_MARKER.write_text(json.dumps(merged_hashes))
+
     # Write timestamp marker for auto-refresh checks
     marker = DATA_DIR / ".last_ingest"
     marker.write_text(str(__import__("time").time()))
 
-    log.info("Ingestion complete: %s", stats)
+    stats = {
+        "repos": repos,
+        "chunks_added": total_added,
+        "chunks_deleted": total_deleted,
+        "collection_count": collection.count(),
+    }
+    if not _INTERACTIVE:
+        log.info("Ingestion complete: %s", stats)
     return stats
 
 
@@ -344,7 +419,10 @@ def main():
     from percona_dk.version_check import print_version_notice
     print_version_notice()
     result = ingest()
-    print(f"\n✓ Ingestion complete: {result['chunks']} chunks loaded into ChromaDB")
+    added = result["chunks_added"]
+    deleted = result["chunks_deleted"]
+    total = result["collection_count"]
+    print(f"\n✓ Ingestion complete: {added} added, {deleted} removed — {total} chunks total")
 
 
 if __name__ == "__main__":
