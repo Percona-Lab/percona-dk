@@ -487,10 +487,16 @@ echo -e "${BOLD}Indexing documentation...${NC}"
 echo ""
 
 if [ -d "$CHROMA_DIR" ]; then
-  ok "Documentation index already exists"
-  info "Auto-refresh is enabled — docs will re-index in the background every ${REFRESH_DAYS} day(s)."
+  if [ "$REPOS_VALUE" != "$EXISTING_REPOS" ]; then
+    warn "Repo selection changed — re-indexing required to include new repos"
+    REINDEX_DEFAULT="y"
+  else
+    ok "Documentation index already exists"
+    info "Auto-refresh is enabled — docs will re-index in the background every ${REFRESH_DAYS} day(s)."
+    REINDEX_DEFAULT="n"
+  fi
   echo ""
-  if ! confirm "Re-index now anyway?" "n"; then
+  if ! confirm "Re-index now?" "$REINDEX_DEFAULT"; then
     SKIP_INGEST=true
   fi
   echo ""
