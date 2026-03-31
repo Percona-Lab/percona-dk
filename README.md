@@ -23,8 +23,14 @@ percona-dk works with any AI tool that supports MCP or HTTP APIs:
 
 ## Quick start
 
+**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Percona-Lab/percona-dk/main/install-percona-dk | bash
+```
+
+**Windows** (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/Percona-Lab/percona-dk/main/install-percona-dk.ps1 | iex
 ```
 
 The installer handles everything:
