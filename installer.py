@@ -632,6 +632,11 @@ def run_ingestion(install_dir: Path, selected_repos: list, existing_repos: list,
 
     env = {"DOTENV_PATH": str(env_path)}
 
+    total_docs = sum(md_counts.get(r, 0) or 0 for r in selected_repos)
+    total_mins = max(1, math.ceil(total_docs * 7.5 / 1000)) if total_docs else None
+    disk_mb = total_docs // 2
+    est_str = f"~{total_mins} min, ~{disk_mb}MB" if total_mins else "? min"
+
     if chroma_dir.exists():
         repos_changed = set(selected_repos) != set(existing_repos)
 
@@ -652,12 +657,10 @@ def run_ingestion(install_dir: Path, selected_repos: list, existing_repos: list,
         else:
             print(f"  {DIM}Index exists.{NC}")
 
-        do_ingest = ask_yn("Re-index now?", default=True)
+        do_ingest = ask_yn(f"Re-index now? ({est_str})", default=True)
     else:
-        total_docs = sum(md_counts.get(r, 0) or 0 for r in selected_repos)
-        total_mins = max(1, math.ceil(total_docs * 7.5 / 1000))
-        print(f"  No index found. Indexing will take ~{total_mins} min.")
-        do_ingest = ask_yn("Run ingestion now?", default=True)
+        print(f"  No index found.")
+        do_ingest = ask_yn(f"Run ingestion now? ({est_str})", default=True)
 
     if do_ingest:
         info("Starting ingestion - this may take a while...")
