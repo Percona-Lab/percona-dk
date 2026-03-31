@@ -355,10 +355,9 @@ def fetch_md_count(repo_slug: str, results: dict, lock: threading.Lock, rate_lim
             if e.code in (403, 429):
                 rate_limited.append(repo_slug)
             results[repo_slug] = None
-    except Exception as e:
+    except Exception:
         with lock:
             results[repo_slug] = None
-        print(f"  {DIM}[debug] {repo_slug}: {type(e).__name__}: {e}{NC}", flush=True)
 
 
 def fetch_all_md_counts() -> dict:
