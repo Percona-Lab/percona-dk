@@ -32,11 +32,7 @@ ask() {
   local prompt="$1"
   local default="$2"
   local answer
-  if [ -n "$default" ]; then
-    printf "  %s [%s${DIM}%s%s]: " "$prompt" "${NC}" "$default" "${NC}"
-  else
-    printf "  %s: " "$prompt"
-  fi
+  printf "  %s [${DIM}%s${NC}]: " "$prompt" "$default"
   read -r answer </dev/tty
   echo "${answer:-$default}"
 }
@@ -102,7 +98,6 @@ install_uv() {
   case "$(uname -s)" in
     Darwin|Linux)
       curl -LsSf https://astral.sh/uv/install.sh | sh
-      # uv installs to ~/.local/bin or ~/.cargo/bin
       export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
       ;;
     *)
@@ -122,19 +117,31 @@ install_uv() {
 check_git() {
   if command -v git &>/dev/null; then
     ok "Git ($(git --version | awk '{print $3}'))"
-  else
-    case "$(uname -s)" in
-      Darwin) xcode-select --install 2>/dev/null || fail "Install Git from https://git-scm.com" ;;
-      Linux)
-        if command -v apt-get &>/dev/null; then sudo apt-get install -y git
-        elif command -v dnf &>/dev/null; then sudo dnf install -y git
-        else fail "Install Git from https://git-scm.com"
-        fi
-        ;;
-      *) fail "Install Git from https://git-scm.com" ;;
-    esac
-    ok "Git installed"
+    return
   fi
+
+  warn "Git not found — installing..."
+  case "$(uname -s)" in
+    Darwin) xcode-select --install 2>/dev/null || fail "Install Git from https://git-scm.com" ;;
+    Linux)
+      if command -v apt-get &>/dev/null; then sudo apt-get install -y git
+      elif command -v dnf &>/dev/null; then sudo dnf install -y git
+      else fail "Install Git from https://git-scm.com"
+      fi
+      ;;
+    *) fail "Install Git from https://git-scm.com" ;;
+  esac
+  ok "Git installed"
+}
+
+# ── Detect Claude config paths (OS-aware) ────────────────────
+
+detect_claude_desktop_config() {
+  case "$(uname -s)" in
+    Darwin) echo "$HOME/Library/Application Support/Claude/claude_desktop_config.json" ;;
+    Linux)  echo "$HOME/.config/Claude/claude_desktop_config.json" ;;
+    *)      echo "" ;;
+  esac
 }
 
 # ── Prerequisites ─────────────────────────────────────────────
@@ -151,7 +158,7 @@ echo ""
 
 DEFAULT_DIR="$HOME/percona-dk"
 INSTALL_DIR=$(ask "Install directory" "$DEFAULT_DIR")
-INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"  # expand leading ~
+INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
 
 echo ""
 
@@ -179,12 +186,9 @@ echo -e "${BOLD}Setting up Python environment...${NC}"
 echo ""
 
 VENV_DIR="$INSTALL_DIR/.venv"
-
-# uv venv --python 3.12 downloads Python automatically if not present
 uv venv "$VENV_DIR" --python 3.12 --quiet
 ok "Virtual environment ready (Python 3.12)"
 
-# uv pip is significantly faster than plain pip
 uv pip install --quiet -e "$INSTALL_DIR" --python "$VENV_DIR/bin/python"
 ok "percona-dk installed"
 
@@ -195,45 +199,83 @@ echo ""
 # ── Configure .env ────────────────────────────────────────────
 
 DOTENV_PATH="$INSTALL_DIR/.env"
+[ ! -f "$DOTENV_PATH" ] && cp "$INSTALL_DIR/.env.example" "$DOTENV_PATH"
 
-if [ ! -f "$DOTENV_PATH" ]; then
-  cp "$INSTALL_DIR/.env.example" "$DOTENV_PATH"
+# ── Choose repos ──────────────────────────────────────────────
+
+echo -e "${BOLD}Choose documentation repos to index${NC}"
+echo ""
+info "Select the Percona products you work with."
+info "You can add more later by editing $DOTENV_PATH and re-running percona-dk-ingest."
+echo ""
+
+# Repo slug | display name | default (y/n)
+REPO_LIST=(
+  "percona/psmysql-docs|Percona Server for MySQL|y"
+  "percona/pxc-docs|XtraDB Cluster (PXC)|y"
+  "percona/pxb-docs|XtraBackup|y"
+  "percona/pmm-doc|Percona Monitoring and Management (PMM)|y"
+  "percona/psmdb-docs|Percona Server for MongoDB|n"
+  "percona/postgresql-docs|Percona Distribution for PostgreSQL|n"
+  "percona/percona-toolkit-doc|Percona Toolkit|n"
+  "percona/k8sps-docs|Kubernetes Operator for MySQL|n"
+  "percona/k8spxc-docs|Kubernetes Operator for PXC|n"
+  "percona/k8spsmdb-docs|Kubernetes Operator for MongoDB|n"
+  "percona/k8sppg-docs|Kubernetes Operator for PostgreSQL|n"
+  "percona/everest-doc|Percona Everest|n"
+  "percona/pbm-docs|Percona Backup for MongoDB|n"
+  "percona/proxysql-admin-tool-doc|ProxySQL Admin Tool|n"
+)
+
+SELECTED_REPOS=()
+for entry in "${REPO_LIST[@]}"; do
+  slug="${entry%%|*}"
+  rest="${entry#*|}"
+  name="${rest%%|*}"
+  default="${rest##*|}"
+  if confirm "Index $name?" "$default"; then
+    SELECTED_REPOS+=("$slug")
+  fi
+done
+
+echo ""
+
+if [ ${#SELECTED_REPOS[@]} -eq 0 ]; then
+  warn "No repos selected — defaulting to percona/psmysql-docs"
+  SELECTED_REPOS=("percona/psmysql-docs")
 fi
 
-echo -e "${BOLD}Configure documentation repos${NC}"
-echo ""
-info "Percona DK indexes doc repos from GitHub and makes them searchable."
-info "The more repos you add, the more complete your results."
-echo ""
-info "Available repos (comma-separated):"
-info "  percona/psmysql-docs        - Percona Server for MySQL"
-info "  percona/pxc-docs            - XtraDB Cluster"
-info "  percona/pxb-docs            - XtraBackup"
-info "  percona/pmm-doc             - Percona Monitoring and Management"
-info "  percona/psmdb-docs          - Percona Server for MongoDB"
-info "  percona/postgresql-docs     - Percona Distribution for PostgreSQL"
-info "  percona/percona-toolkit-doc - Percona Toolkit"
-info "  percona/k8sps-docs          - Kubernetes Operator for MySQL"
-info "  percona/k8spxc-docs         - Kubernetes Operator for PXC"
-info "  percona/k8spsmdb-docs       - Kubernetes Operator for MongoDB"
-info "  percona/everest-doc         - Percona Everest"
+REPOS_VALUE=$(IFS=,; echo "${SELECTED_REPOS[*]}")
+ok "${#SELECTED_REPOS[@]} repo(s) selected"
+
 echo ""
 
-DEFAULT_REPOS="percona/psmysql-docs,percona/pxc-docs,percona/pxb-docs,percona/pmm-doc"
-REPOS=$(ask "Repos to index" "$DEFAULT_REPOS")
+# ── Choose sync frequency ─────────────────────────────────────
 
-# Write REPOS to .env (replace existing value if present)
-if grep -q "^REPOS=" "$DOTENV_PATH"; then
-  "$PYTHON_BIN" -c "
-import re, pathlib
-p = pathlib.Path('$DOTENV_PATH')
-text = p.read_text()
-text = re.sub(r'^REPOS=.*', 'REPOS=$REPOS', text, flags=re.MULTILINE)
-p.write_text(text)
-"
-else
-  echo "REPOS=$REPOS" >> "$DOTENV_PATH"
-fi
+echo -e "${BOLD}Auto-sync frequency${NC}"
+echo ""
+info "Percona DK re-indexes docs automatically in the background when"
+info "the MCP server starts and the data is older than the threshold."
+echo ""
+
+REFRESH_DAYS=$(ask "Re-index docs every N days (0 to disable)" "7")
+
+echo ""
+
+# ── Write .env ────────────────────────────────────────────────
+
+"$PYTHON_BIN" - "$DOTENV_PATH" "$REPOS_VALUE" "$REFRESH_DAYS" <<'PYEOF'
+import re, pathlib, sys
+
+env_path = pathlib.Path(sys.argv[1])
+repos    = sys.argv[2]
+refresh  = sys.argv[3]
+
+text = env_path.read_text()
+text = re.sub(r"^REPOS=.*",        f"REPOS={repos}",        text, flags=re.MULTILINE)
+text = re.sub(r"^REFRESH_DAYS=.*", f"REFRESH_DAYS={refresh}", text, flags=re.MULTILINE)
+env_path.write_text(text)
+PYEOF
 
 ok ".env configured"
 echo ""
@@ -245,15 +287,17 @@ echo ""
 
 WIRED_ANYTHING=false
 
-# Claude Desktop (macOS)
-CLAUDE_DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
-if [ -d "$HOME/Library/Application Support/Claude" ] || confirm "Configure Claude Desktop?" "y"; then
-  inject_mcp_config "$CLAUDE_DESKTOP_CONFIG" "$PYTHON_BIN" "$DOTENV_PATH"
-  ok "Claude Desktop configured"
-  WIRED_ANYTHING=true
+# Claude Desktop
+CLAUDE_DESKTOP_CONFIG=$(detect_claude_desktop_config)
+if [ -n "$CLAUDE_DESKTOP_CONFIG" ]; then
+  if [ -d "$(dirname "$CLAUDE_DESKTOP_CONFIG")" ] || confirm "Configure Claude Desktop?" "y"; then
+    inject_mcp_config "$CLAUDE_DESKTOP_CONFIG" "$PYTHON_BIN" "$DOTENV_PATH"
+    ok "Claude Desktop configured"
+    WIRED_ANYTHING=true
+  fi
 fi
 
-# Claude Code (settings.json)
+# Claude Code (~/.claude/settings.json — same path on all platforms)
 CLAUDE_CODE_CONFIG="$HOME/.claude/settings.json"
 if [ -f "$CLAUDE_CODE_CONFIG" ] || confirm "Configure Claude Code (CLI)?" "y"; then
   inject_mcp_config "$CLAUDE_CODE_CONFIG" "$PYTHON_BIN" "$DOTENV_PATH"
@@ -267,8 +311,8 @@ echo ""
 
 echo -e "${BOLD}Indexing documentation...${NC}"
 echo ""
-info "This downloads the selected repos and builds a local semantic search index."
-info "It may take a few minutes depending on the number of repos."
+info "Downloads selected repos and builds a local semantic search index."
+info "May take a few minutes depending on the number of repos selected."
 echo ""
 
 if confirm "Run initial ingestion now?" "y"; then
@@ -302,6 +346,6 @@ echo ""
 info "To re-index docs at any time:"
 info "  DOTENV_PATH=\"$DOTENV_PATH\" $VENV_DIR/bin/percona-dk-ingest"
 echo ""
-info "To add more repos, edit: $DOTENV_PATH"
+info "To change repos or sync frequency, edit: $DOTENV_PATH"
 info "Then re-run percona-dk-ingest."
 echo ""
