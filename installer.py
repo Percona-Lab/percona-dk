@@ -634,12 +634,28 @@ def run_ingestion(install_dir: Path, selected_repos: list, existing_repos: list,
 
     if chroma_dir.exists():
         repos_changed = set(selected_repos) != set(existing_repos)
+
+        # Check how long ago the last ingest ran
+        marker = install_dir / "data" / ".last_ingest"
+        ingest_age_days = None
+        if marker.exists():
+            try:
+                ingest_age_days = (time.time() - float(marker.read_text().strip())) / 86400
+            except Exception:
+                pass
+
+        # Default to Y if repos changed, index is stale (>1 day), or we can't tell
+        reindex_default = repos_changed or (ingest_age_days is None) or (ingest_age_days > 1)
+
         if repos_changed:
-            warn("Repo selection changed - existing index may be stale.")
-            do_ingest = ask_yn("Re-index now?", default=True)
+            warn("Repo selection changed - re-indexing recommended.")
+        elif ingest_age_days is not None:
+            age_str = f"{int(ingest_age_days)}d" if ingest_age_days >= 1 else f"{int(ingest_age_days * 24)}h"
+            print(f"  {DIM}Index exists (last run: {age_str} ago).{NC}")
         else:
-            print(f"  {DIM}Index already exists.{NC}")
-            do_ingest = ask_yn("Re-index now?", default=False)
+            print(f"  {DIM}Index exists.{NC}")
+
+        do_ingest = ask_yn("Re-index now?", default=reindex_default)
     else:
         total_docs = sum(md_counts.get(r, 0) or 0 for r in selected_repos)
         total_mins = max(1, math.ceil(total_docs * 7.5 / 1000))
