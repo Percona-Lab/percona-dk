@@ -4,6 +4,7 @@ Percona DK Installer - cross-platform installer for Percona DK.
 Run with: uv run --python 3.12 installer.py
 """
 
+import hashlib
 import json
 import math
 import os
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -730,6 +732,90 @@ def run_ingestion(install_dir: Path, selected_repos: list, existing_repos: list,
     print()
 
 # ---------------------------------------------------------------------------
+# Install analytics (fire-and-forget, best-effort, privacy-preserving)
+# ---------------------------------------------------------------------------
+
+ANALYTICS_URL = os.getenv(
+    "PERCONA_DK_ANALYTICS_URL",
+    "https://script.google.com/macros/s/AKfycbyPZGQMhUy1MFdbVNDrasAYDV_c-PMw_GhGRYAnCUSWyXU5NRc76iYdKg7huj_8_k0/exec",
+)
+
+
+def _get_machine_hash() -> str:
+    """Return a SHA-256 hash of a stable machine identifier. Never sends raw ID."""
+    try:
+        if platform.system() == "Darwin":
+            out = subprocess.check_output(
+                ["ioreg", "-d2", "-c", "IOPlatformExpertDevice"],
+                text=True, timeout=5,
+            )
+            for line in out.splitlines():
+                if "IOPlatformUUID" in line:
+                    raw = line.split('"')[-2]
+                    return hashlib.sha256(raw.encode()).hexdigest()
+        elif platform.system() == "Linux":
+            for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"]:
+                if os.path.exists(path):
+                    raw = open(path).read().strip()
+                    return hashlib.sha256(raw.encode()).hexdigest()
+        elif platform.system() == "Windows":
+            out = subprocess.check_output(
+                ["wmic", "csproduct", "get", "UUID"],
+                text=True, timeout=5,
+            )
+            raw = out.strip().splitlines()[-1].strip()
+            return hashlib.sha256(raw.encode()).hexdigest()
+    except Exception:
+        pass
+    # Fallback: random per-install hash (won't dedup but still counts)
+    return hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+
+
+def _get_dk_version(install_dir: Path) -> str:
+    """Try to read the installed percona-dk version."""
+    try:
+        toml_path = install_dir / "pyproject.toml"
+        if toml_path.exists():
+            for line in toml_path.read_text().splitlines():
+                if line.strip().startswith("version"):
+                    return line.split("=")[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return "unknown"
+
+
+def send_install_analytics(install_dir: Path, selected_repos: list) -> None:
+    """Fire-and-forget install analytics. Runs in background thread, never blocks."""
+
+
+    def _send():
+        try:
+            stacks_used = set()
+            for stack in STACKS:
+                if any(r in selected_repos for r in stack["repos"]):
+                    stacks_used.add(stack["name"])
+
+            payload = json.dumps({
+                "action": "install",
+                "machine_hash": _get_machine_hash(),
+                "app_version": _get_dk_version(install_dir),
+                "os_version": f"{platform.system()} {platform.release()}",
+                "platform": platform.machine(),
+                "repo_count": len(selected_repos),
+                "stacks": ",".join(sorted(stacks_used)),
+            }).encode()
+
+            req = Request(ANALYTICS_URL, data=payload, method="POST")
+            req.add_header("Content-Type", "application/json")
+            urlopen(req, timeout=10)
+        except Exception:
+            pass  # Best-effort, never fail the install
+
+    t = threading.Thread(target=_send, daemon=True)
+    t.start()
+
+
+# ---------------------------------------------------------------------------
 # Step 13: Done
 # ---------------------------------------------------------------------------
 
@@ -786,6 +872,9 @@ def main() -> None:
 
     # Step 12: Ingestion
     run_ingestion(install_dir, selected_repos, existing_repos, md_counts)
+
+    # Step 12b: Install analytics (fire-and-forget)
+    send_install_analytics(install_dir, selected_repos)
 
     # Step 13: Done
     print_done(any_configured)
