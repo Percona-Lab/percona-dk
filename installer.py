@@ -63,6 +63,7 @@ REPO_NAMES: dict[str, str] = {
     "openeverest/everest-doc": "OpenEverest DBaaS Platform",
     "percona/proxysql-admin-tool-doc": "ProxySQL Admin Tool",
     "percona/percona-toolkit": "Percona Toolkit",
+    "percona/percona-valkey-doc": "Percona Packages for Valkey",
     "percona/pmm_dump_docs": "PMM Dump",
     "percona/repo-config-docs": "Percona Software Repositories",
 }
@@ -76,7 +77,6 @@ STACKS = [
             "percona/pxb-docs",
             "percona/pdmysql-docs",
             "percona/ps-binlog-server-docs",
-            "percona/pmm-doc",
         ],
     },
     {
@@ -96,6 +96,12 @@ STACKS = [
         ],
     },
     {
+        "name": "Valkey",
+        "repos": [
+            "percona/percona-valkey-doc",
+        ],
+    },
+    {
         "name": "Kubernetes Operators",
         "repos": [
             "percona/k8sps-docs",
@@ -111,11 +117,12 @@ STACKS = [
         ],
     },
     {
-        "name": "Tools",
+        "name": "Tools and PMM",
         "repos": [
+            "percona/pmm-doc",
+            "percona/pmm_dump_docs",
             "percona/proxysql-admin-tool-doc",
             "percona/percona-toolkit",
-            "percona/pmm_dump_docs",
             "percona/repo-config-docs",
         ],
     },
@@ -144,6 +151,7 @@ FALLBACK_MD_COUNTS: dict[str, int] = {
     "percona/k8spxc-docs": 144,
     "percona/k8spsmdb-docs": 175,
     "percona/k8spg-docs": 121,
+    "percona/percona-valkey-doc": 25,
     "openeverest/everest-doc": 122,
     "percona/proxysql-admin-tool-doc": 62,
     "percona/percona-toolkit": 30,

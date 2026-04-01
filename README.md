@@ -82,22 +82,23 @@ The installer lets you choose which stacks to index. All repos are public Percon
 | **MySQL** | `percona/pxb-docs` | Percona XtraBackup |
 | **MySQL** | `percona/pdmysql-docs` | Percona Distribution for MySQL |
 | **MySQL** | `percona/ps-binlog-server-docs` | Percona Binlog Server |
-| **MySQL** | `percona/pmm-doc` | Percona Monitoring and Management |
 | **MongoDB** | `percona/psmdb-docs` | Percona Server for MongoDB |
 | **MongoDB** | `percona/pbm-docs` | Percona Backup for MongoDB |
 | **MongoDB** | `percona/pcsm-docs` | Percona ClusterSync for MongoDB |
 | **PostgreSQL** | `percona/postgresql-docs` | Percona Distribution for PostgreSQL |
 | **PostgreSQL** | `percona/pg_tde` | pg_tde (Transparent Data Encryption) |
 | **PostgreSQL** | `percona/pgsm-docs` | pg_stat_monitor |
+| **Valkey** | `percona/percona-valkey-doc` | Percona Packages for Valkey |
 | **Kubernetes Operators** | `percona/k8sps-docs` | Operator for MySQL |
 | **Kubernetes Operators** | `percona/k8spxc-docs` | Operator for PXC |
 | **Kubernetes Operators** | `percona/k8spsmdb-docs` | Operator for MongoDB |
 | **Kubernetes Operators** | `percona/k8spg-docs` | Operator for PostgreSQL |
 | **OpenEverest** | `openeverest/everest-doc` | OpenEverest DBaaS Platform |
-| **Tools** | `percona/proxysql-admin-tool-doc` | ProxySQL Admin Tool |
-| **Tools** | `percona/percona-toolkit` | Percona Toolkit (RST docs) |
-| **Tools** | `percona/pmm_dump_docs` | PMM Dump |
-| **Tools** | `percona/repo-config-docs` | Percona Software Repositories |
+| **Tools and PMM** | `percona/pmm-doc` | Percona Monitoring and Management |
+| **Tools and PMM** | `percona/pmm_dump_docs` | PMM Dump |
+| **Tools and PMM** | `percona/proxysql-admin-tool-doc` | ProxySQL Admin Tool |
+| **Tools and PMM** | `percona/percona-toolkit` | Percona Toolkit (RST docs) |
+| **Tools and PMM** | `percona/repo-config-docs` | Percona Software Repositories |
 
 The MySQL stack and Tools are indexed by default. MongoDB, PostgreSQL, Kubernetes Operators, and OpenEverest are opt-in during installation.
 
