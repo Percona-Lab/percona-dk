@@ -4,7 +4,17 @@
 
 Semantic search and retrieval of Percona documentation for AI assistants and developer tools.
 
-**percona-dk** ingests official Percona documentation from source (GitHub repos), chunks and embeds it locally, and exposes it via REST API and [MCP](https://modelcontextprotocol.io/) server. Your AI tools get accurate, up-to-date Percona docs — no stale training data, no fragile web scraping.
+**percona-dk** ingests official Percona documentation from source (GitHub repos), chunks and embeds it locally, and exposes it via REST API and [MCP](https://modelcontextprotocol.io/) server. Your AI tools get accurate, up-to-date Percona docs -- no stale training data, no fragile web scraping.
+
+## Why this matters
+
+It's not just about new information. Percona DK helps in three distinct ways:
+
+1. **New features the LLM can't know about** -- PXC 8.4 added a Clone plugin for SST in April 2025. No LLM has this in training data. Without DK, the AI confidently tells you the feature doesn't exist.
+
+2. **Percona-specific products the LLM overlooks** -- Percona built a dedicated tool for Atlas-to-PSMDB migrations (Percona Link for MongoDB). Without DK, the AI recommends `mongosync` or a DIY approach. The right tool exists -- the LLM just doesn't know about it.
+
+3. **Operational details the LLM gets vaguely right but not precisely right** -- This is the most common day-to-day value. The AI gives you a reasonable answer, but DK gives you the exact flags, version constraints, setup gotchas (like needing to enable MongoDB profiling for PMM Query Analytics), and copy-paste commands from current docs. When you're writing production configs or answering a customer, "mostly right" isn't good enough.
 
 ## Supported tools
 
