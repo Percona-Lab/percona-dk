@@ -1,6 +1,6 @@
 # Percona Developer Knowledge (percona-dk)
 
-> **Status:** Fully functional, 21 doc repos across 6 stacks, MCP + REST API working. Supports Markdown and reStructuredText. With community interest, this could grow into an official Percona developer resource.
+> **Status:** Fully functional, 22 doc repos across 7 stacks, MCP + REST API working. Supports Markdown and reStructuredText. With community interest, this could grow into an official Percona developer resource.
 
 Semantic search and retrieval of Percona documentation for AI assistants and developer tools.
 
