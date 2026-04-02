@@ -16,7 +16,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "chromadb>=1.0",
-    "fastmcp>=2.0",
+    "fastmcp>=2.0,<4",
     "gitpython>=3.1",
     "python-dotenv>=1.0",
 ]
