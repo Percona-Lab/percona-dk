@@ -338,9 +338,9 @@ def setup_venv(install_dir: Path) -> None:
     )
 
     py = python_in_venv(venv)
-    info("Installing percona-dk package...")
+    info("Installing percona-dk package (this may take a few minutes)...")
     run(
-        ["uv", "pip", "install", "--quiet", "-e", ".", "--python", str(py)],
+        ["uv", "pip", "install", "-e", ".", "--python", str(py)],
         cwd=install_dir,
     )
 
