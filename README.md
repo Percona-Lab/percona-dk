@@ -20,16 +20,26 @@ It's not just about new information. Percona DK helps in three distinct ways:
 
 percona-dk works with any AI tool that supports MCP or HTTP APIs:
 
-| Tool | How it connects |
-|------|----------------|
-| **Claude Desktop** | MCP server (stdio) — auto-configured by installer |
-| **Claude Code** | MCP server (stdio) — auto-configured by installer |
-| **Cursor** | MCP server (stdio) — add to Cursor MCP settings |
-| **Windsurf** | MCP server (stdio) — add to Windsurf MCP settings |
-| **Zed** | MCP server (stdio) — add to Zed MCP settings |
-| **Open WebUI** | REST API — point to `http://localhost:8000` |
-| **Any MCP client** | MCP server (stdio) |
-| **Any HTTP client** | REST API on port 8000 |
+| Tool | How it connects | Windows |
+| --- | --- | --- |
+| **Claude Desktop** | MCP server (stdio) - add to `claude_desktop_config.json` | Yes |
+| **Claude Code** | MCP server (stdio) - add to `.claude/settings.json` | Yes |
+| **Cursor** | MCP server (stdio) - add to `.cursor/mcp.json` | Yes |
+| **Windsurf** | MCP server (stdio) - add to Windsurf MCP settings | Yes |
+| **GitHub Copilot** | MCP server (stdio) - add to `.vscode/mcp.json`, use Agent Mode | Yes |
+| **OpenAI Codex CLI** | MCP server (stdio) - add to `~/.codex/config.toml` | WSL only |
+| **Codex IDE extension** | MCP server (stdio) - shares config with Codex CLI | Yes (VS Code) |
+| **Cherry Studio** | MCP server (stdio) - add to MCP settings | Yes |
+| **LM Studio** | MCP server (stdio) - configure in MCP client settings | Yes |
+| **AnythingLLM** | MCP server (stdio) - edit `anythingllm_mcp_servers.json` | Yes |
+| **Open WebUI** | REST API - point to `http://localhost:8000` | Yes |
+| **LibreChat** | REST API or MCP via proxy - configure in YAML | Yes |
+| **Any MCP client** | MCP server (stdio) | - |
+| **Any HTTP client** | REST API on port 8000 | - |
+
+> **Windows note:** percona-dk itself runs on Windows natively (Python + pip install). For the Codex CLI specifically, OpenAI recommends running inside WSL, though the Codex IDE extension in VS Code works natively. All other tools listed above work on Windows without WSL.
+
+> **LLM compatibility:** MCP is a protocol, not a model feature. Any LLM with tool/function-calling support works, including Claude, GPT-4o, Gemini, Qwen, Llama (via Ollama), Mistral, and others. Reasoning-only models without tool-calling support are not compatible.
 
 ## Quick start
 
@@ -146,6 +156,27 @@ If you need to configure an MCP client manually, use:
 For Claude Desktop: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `~/.config/Claude/claude_desktop_config.json` (Linux).
 
 For Claude Code: `~/.claude/settings.json`.
+
+For GitHub Copilot (VS Code), add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "percona-dk": {
+      "command": "/path/to/percona-dk/.venv/bin/percona-dk-mcp"
+    }
+  }
+}
+```
+
+Then switch to **Agent Mode** in Copilot Chat to use MCP tools.
+
+For OpenAI Codex CLI, add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.percona-dk]
+command = ["/path/to/percona-dk/.venv/bin/percona-dk-mcp"]
+```
 
 ## Keeping docs up to date
 
