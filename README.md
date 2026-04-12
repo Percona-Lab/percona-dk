@@ -4,7 +4,9 @@
 
 Semantic search and retrieval of Percona documentation for AI assistants and developer tools.
 
-**percona-dk** ingests official Percona documentation from source (GitHub repos), chunks and embeds it locally, and exposes it via REST API and [MCP](https://modelcontextprotocol.io/) server. Your AI tools get accurate, up-to-date Percona docs -- no stale training data, no fragile web scraping.
+**percona-dk** ingests official Percona documentation from source (GitHub repos), chunks and embeds it locally, and exposes it via REST API and [MCP](https://modelcontextprotocol.io/) server. Your AI tools get accurate, up-to-date Percona docs, not stale training data, not fragile web scraping.
+
+**The critical use case:** when an AI agent is tasked with installing, configuring, or managing Percona products on real infrastructure, it generates and executes real commands. Without DK, those commands come from training data: wrong package names, deprecated flags, missing safety checks. With DK, the agent pulls the current install guide, the correct repo setup, and exact configuration steps from official Percona docs. This isn't about better answers. It's about commands that won't break your cluster.
 
 ## Why this matters
 
@@ -40,6 +42,18 @@ percona-dk works with any AI tool that supports MCP or HTTP APIs:
 > **Windows note:** percona-dk itself runs on Windows natively (Python + pip install). For the Codex CLI specifically, OpenAI recommends running inside WSL, though the Codex IDE extension in VS Code works natively. All other tools listed above work on Windows without WSL.
 
 > **LLM compatibility:** MCP is a protocol, not a model feature. Any LLM with tool/function-calling support works, including Claude, GPT-4o, Gemini, Qwen, Llama (via Ollama), Mistral, and others. Reasoning-only models without tool-calling support are not compatible.
+
+## Why
+
+Every AI tool you use has Percona in its training data. The problem is that training data is stale, incomplete, and sometimes wrong. This matters most when your AI agent is actively executing commands:
+
+- **Agent-driven installation and management** -- When Claude Code runs `apt install` or writes a `my.cnf` based on hallucinated knowledge, you get broken clusters. DK grounds every command in current official docs.
+- **Deprecated syntax** -- LLMs still recommend `innobackupex` (removed in XtraBackup 8.0) and hallucinate flags that don't exist.
+- **Missing Percona-specific features** -- Percona Server has features upstream MySQL doesn't, and vice versa. Generic training data doesn't distinguish them.
+- **Wrong product version** -- An answer based on MySQL 5.7 docs applied to Percona Server 8.4 can silently break things.
+- **No source citations** -- Without DK, you get confident answers with no way to verify against official docs.
+
+The value is highest when an AI agent is about to act on the information. Installing, configuring, upgrading, and troubleshooting Percona products are tasks where stale training data produces commands that silently break things.
 
 ## Quick start
 
@@ -239,6 +253,7 @@ percona-dk/
 
 Potential next steps:
 
+- **First-class agent support** -- Optimized tool descriptions and response formats for AI agents performing installation, configuration, and management tasks
 - **Better embeddings** — swap in a larger model for improved search quality
 - **Version-aware search** — filter results by product version (8.0 vs 8.4)
 - **Expanded corpus** — blog posts, knowledge base articles
