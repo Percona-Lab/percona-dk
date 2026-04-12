@@ -6,7 +6,7 @@ Semantic search and retrieval of Percona documentation for AI assistants and dev
 
 **percona-dk** ingests official Percona documentation from source (GitHub repos), chunks and embeds it locally, and exposes it via REST API and [MCP](https://modelcontextprotocol.io/) server. Your AI tools get accurate, up-to-date Percona docs, not stale training data, not fragile web scraping.
 
-**The critical use case:** when an AI agent is tasked with installing, configuring, or managing Percona products on real infrastructure, it generates and executes real commands. Without DK, those commands come from training data: wrong package names, deprecated flags, missing safety checks. With DK, the agent pulls the current install guide, the correct repo setup, and exact configuration steps from official Percona docs. This isn't about better answers. It's about commands that won't break your cluster.
+**Where it helps most today:** people asking AI tools Percona questions and acting on the answers -- configuring, debugging, planning. **Where it matters most (and growing fast):** when AI tools write install scripts, Ansible playbooks, Terraform configs, or step-by-step guides for Percona products. That output goes to real infrastructure. Without percona-dk, it comes from stale training data: wrong package names, deprecated flags, missing safety checks. With percona-dk, the AI pulls from current official docs. The human still reviews and runs it, but the starting point is accurate instead of plausible.
 
 ## Why this matters
 
@@ -45,15 +45,14 @@ percona-dk works with any AI tool that supports MCP or HTTP APIs:
 
 ## Why
 
-Every AI tool you use has Percona in its training data. The problem is that training data is stale, incomplete, and sometimes wrong. This matters most when your AI agent is actively executing commands:
+Every AI tool you use has Percona in its training data. The problem is that training data is stale, incomplete, and sometimes wrong:
 
-- **Agent-driven installation and management** -- When Claude Code runs `apt install` or writes a `my.cnf` based on hallucinated knowledge, you get broken clusters. DK grounds every command in current official docs.
 - **Deprecated syntax** -- LLMs still recommend `innobackupex` (removed in XtraBackup 8.0) and hallucinate flags that don't exist.
-- **Missing Percona-specific features** -- Percona Server has features upstream MySQL doesn't, and vice versa. Generic training data doesn't distinguish them.
+- **Missing Percona-specific features** -- Percona Server has features upstream MySQL doesn't, and vice versa. Generic training data doesn't distinguish them. Percona built a dedicated tool for Atlas-to-PSMDB migrations (Percona Link for MongoDB), but without DK, the AI recommends `mongosync` or a DIY approach.
 - **Wrong product version** -- An answer based on MySQL 5.7 docs applied to Percona Server 8.4 can silently break things.
 - **No source citations** -- Without DK, you get confident answers with no way to verify against official docs.
 
-The value is highest when an AI agent is about to act on the information. Installing, configuring, upgrading, and troubleshooting Percona products are tasks where stale training data produces commands that silently break things.
+Today, the main value is accurate answers to day-to-day Percona questions. Increasingly, AI tools are also writing install scripts, playbooks, and configs that go straight to real infrastructure -- and that's where stale training data does the most damage.
 
 ## Quick start
 
@@ -253,7 +252,7 @@ percona-dk/
 
 Potential next steps:
 
-- **First-class agent support** -- Optimized tool descriptions and response formats for AI agents performing installation, configuration, and management tasks
+- **Optimized for AI-assisted ops** -- Better tool descriptions and response formats as AI-generated install scripts, playbooks, and configs become standard workflow
 - **Better embeddings** — swap in a larger model for improved search quality
 - **Version-aware search** — filter results by product version (8.0 vs 8.4)
 - **Expanded corpus** — blog posts, knowledge base articles
