@@ -198,10 +198,26 @@ def get_percona_doc(repo: str, path: str) -> str:
 
 def main():
     """CLI entrypoint for percona-dk-mcp."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Percona DK MCP Server")
+    parser.add_argument(
+        "--transport", default="stdio",
+        choices=["stdio", "sse", "streamable-http"],
+        help="Transport protocol (default: stdio)",
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="Bind host for HTTP transports")
+    parser.add_argument("--port", type=int, default=8080, help="Bind port for HTTP transports")
+    args = parser.parse_args()
+
     from percona_dk.version_check import print_version_notice
     print_version_notice()
     _maybe_refresh()
-    mcp.run()
+
+    if args.transport == "stdio":
+        mcp.run()
+    else:
+        mcp.run(transport=args.transport, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
