@@ -219,3 +219,7 @@ def stats():
         "chunks_per_repo": repo_counts,
         "ingested_repos": ingested_repos,
     }
+
+
+if __name__ == "__main__":
+    main()
