@@ -10,7 +10,7 @@ import json
 log = logging.getLogger(__name__)
 
 REPO = "Percona-Lab/percona-dk"
-LOCAL_VERSION = "0.1.0"
+LOCAL_VERSION = "0.2.0"
 
 
 def check_for_update() -> str | None:

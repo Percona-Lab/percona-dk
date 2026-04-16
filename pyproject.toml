@@ -1,6 +1,6 @@
 [project]
 name = "percona-dk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Percona Developer Knowledge — semantic search and retrieval of Percona documentation for AI assistants and developer tools"
 readme = "README.md"
 license = {text = "Apache-2.0"}

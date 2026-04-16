@@ -48,7 +48,7 @@ COLLECTION_NAME = "percona_docs"
 app = FastAPI(
     title="Percona Developer Knowledge",
     description="Semantic search and retrieval API for Percona documentation",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 _startup_time = datetime.now(timezone.utc)
