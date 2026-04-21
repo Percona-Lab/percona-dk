@@ -114,14 +114,27 @@ def _get_collection() -> chromadb.Collection:
 
 @mcp.tool()
 def search_percona_docs(query: str, top_k: int = 5) -> str:
-    """Search Percona documentation using semantic search.
+    """Semantic search across Percona docs, blog, and forum threads.
 
-    Use this tool when you need to find information about Percona products
-    including configuration, troubleshooting, features, or best practices.
-    Returns the most relevant documentation chunks with source links.
+    This tool searches a single combined corpus that includes:
+      - Official Percona documentation (all product repos on GitHub)
+      - Percona Community blog posts (percona.community/blog)
+      - Percona forum threads (forums.percona.com) - real-world Q&A,
+        troubleshooting discussions, and community-reported issues
+
+    Use this tool for ANY Percona-related question: configuration,
+    troubleshooting, exact error messages, tuning advice, integration
+    patterns, migration experiences, version-specific quirks. You do NOT
+    need to fall back to generic web search for forum or community
+    discussions - they are already indexed here. Each result indicates
+    its source (product doc repo, "percona-community-blog", or
+    "percona-forums") so the caller can weigh official vs. community
+    content appropriately.
 
     Args:
-        query: Natural language search query about Percona products.
+        query: Natural language search query. Can include exact error
+               strings ("WSREP: Failed to open backend connection"),
+               product names, configuration flags, or full questions.
         top_k: Number of results to return (1-20, default 5).
     """
     top_k = max(1, min(top_k, 20))
