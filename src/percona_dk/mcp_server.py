@@ -97,10 +97,13 @@ def _maybe_refresh():
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
     "Percona Developer Knowledge",
-    instructions="Search and retrieve official Percona documentation. "
-    "Use this when you need accurate, up-to-date information about "
-    "Percona Server for MySQL, XtraDB Cluster, XtraBackup, PMM, "
-    "Percona Operators, Percona Toolkit, or other Percona products.",
+    instructions="Search and retrieve Percona knowledge: official product "
+    "documentation, posts from the Percona Community blog "
+    "(percona.community/blog), and threads from the Percona forums "
+    "(forums.percona.com). Use this when you need accurate information "
+    "about Percona Server for MySQL, XtraDB Cluster, XtraBackup, PMM, "
+    "Percona Operators, Percona Toolkit, or other Percona products — "
+    "including real-world troubleshooting Q&A from the community.",
 )
 
 
@@ -173,7 +176,10 @@ def get_percona_doc(repo: str, path: str) -> str:
 
     Args:
         repo: Repository short name, e.g. 'psmysql-docs', 'pxc-docs', 'pmm-doc'.
-        path: File path within the repo, e.g. 'docs/innodb-show-status.md'.
+              For community content, use 'percona-community-blog' or 'percona-forums'.
+        path: File path within the repo, e.g. 'docs/innodb-show-status.md',
+              'posts/2026-04-17-incremental-backups-in-percona-kubernetes-operator-for-mysql.md',
+              or 't/40009/1.md' for a specific forum post.
     """
     repo_dir = None
     for candidate in REPOS_DIR.iterdir():

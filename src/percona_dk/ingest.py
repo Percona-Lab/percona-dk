@@ -485,6 +485,18 @@ def ingest(repos: list[str] | None = None) -> dict:
     FILES_MARKER.parent.mkdir(parents=True, exist_ok=True)
     FILES_MARKER.write_text(json.dumps(merged_hashes))
 
+    # Community content (blog + forum) — shares the same collection.
+    community_stats = {}
+    try:
+        from percona_dk.community import ingest_community
+        if _INTERACTIVE:
+            print("  [community] blog + forum ...", flush=True)
+        community_stats = ingest_community(collection)
+        total_added += community_stats.get("blog_added", 0) + community_stats.get("forum_added", 0)
+        total_deleted += community_stats.get("blog_deleted", 0) + community_stats.get("forum_deleted", 0)
+    except Exception:
+        log.exception("Community ingestion failed (continuing)")
+
     # Write timestamp marker for auto-refresh checks
     marker = DATA_DIR / ".last_ingest"
     marker.write_text(str(__import__("time").time()))
@@ -494,6 +506,7 @@ def ingest(repos: list[str] | None = None) -> dict:
         "chunks_added": total_added,
         "chunks_deleted": total_deleted,
         "collection_count": collection.count(),
+        "community": community_stats,
     }
     if not _INTERACTIVE:
         log.info("Ingestion complete: %s", stats)
