@@ -64,7 +64,9 @@ def _http() -> requests.Session:
     return _session
 
 
-def _get_json(url: str, params: dict | None = None, retries: int = 3) -> dict | list:
+def _get_json(url: str, params=None, retries: int = 3) -> dict | list:
+    """GET JSON with retry on network/5xx errors. 4xx client errors (except 429)
+    raise immediately — retrying them just wastes time."""
     last_exc: Exception | None = None
     for attempt in range(retries):
         try:
@@ -77,8 +79,20 @@ def _get_json(url: str, params: dict | None = None, retries: int = 3) -> dict | 
                 log.warning("Rate limited on %s, sleeping %.1fs", url, sleep_for)
                 time.sleep(sleep_for)
                 continue
+            # Don't retry client errors — they won't change on retry
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                resp.raise_for_status()
             resp.raise_for_status()
             return resp.json()
+        except requests.HTTPError as e:
+            # 4xx: give up now
+            status = getattr(e.response, "status_code", None)
+            if status and 400 <= status < 500 and status != 429:
+                raise
+            last_exc = e
+            if attempt == retries - 1:
+                break
+            time.sleep(2 ** attempt)
         except (requests.RequestException, ValueError) as e:
             last_exc = e
             if attempt == retries - 1:
@@ -363,15 +377,49 @@ def _discourse_sitemap_topics() -> list[tuple[int, str, str]]:
 
 
 def _fetch_topic(topic_id: int) -> dict | None:
-    """Fetch a topic and all its posts. Returns None if inaccessible."""
+    """Fetch a topic and its posts. Returns None if the topic is inaccessible.
+
+    Discourse returns up to ~20 posts per topic in the initial response.
+    For longer topics we fetch the remaining posts via the posts endpoint
+    using post IDs from post_stream.stream.
+    """
     try:
-        data = _get_json(f"{FORUM_BASE}/t/{topic_id}.json", params={"print": "true"})
+        data = _get_json(f"{FORUM_BASE}/t/{topic_id}.json")
     except requests.HTTPError as e:
         status = getattr(e.response, "status_code", None)
-        if status in (403, 404, 410):
+        if status in (400, 403, 404, 410, 422):
             return None
         raise
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+
+    stream = data.get("post_stream", {})
+    all_ids = stream.get("stream") or []
+    have_posts = stream.get("posts") or []
+    have_ids = {p.get("id") for p in have_posts}
+    missing = [pid for pid in all_ids if pid not in have_ids]
+
+    # Paginate — Discourse accepts up to 20 post_ids per request.
+    while missing:
+        batch = missing[:20]
+        missing = missing[20:]
+        try:
+            more = _get_json(
+                f"{FORUM_BASE}/t/{topic_id}/posts.json",
+                params=[("post_ids[]", pid) for pid in batch],
+            )
+        except requests.HTTPError:
+            break
+        if not isinstance(more, dict):
+            break
+        extra = more.get("post_stream", {}).get("posts") or []
+        if not extra:
+            break
+        have_posts.extend(extra)
+        time.sleep(REQUEST_DELAY)
+
+    data["post_stream"]["posts"] = have_posts
+    return data
 
 
 def _build_topic_chunks(topic: dict, categories: dict[int, str]) -> tuple[list[dict], list[str], list[tuple[str, str]]]:
