@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy.sh - Set up percona-dk on a remote VM with systemd services
 #
-# Prerequisites: Python 3.11+, git
+# Prerequisites: Python 3.11+, git, (optional) msmtp for failure alerts
 #
 # What it does:
 #   1. Creates venv + installs percona-dk
@@ -10,6 +10,7 @@
 #      - percona-dk-mcp   (MCP over SSE on port 8402)
 #      - percona-dk-api   (REST API on port 8000)
 #   4. Installs a systemd timer for daily re-ingestion
+#   5. Installs an OnFailure= email alert (requires ~/.msmtprc)
 
 set -euo pipefail
 
@@ -19,6 +20,7 @@ PYTHON="${PYTHON:-python3.12}"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 MCP_PORT="${MCP_PORT:-8402}"
 API_PORT="${API_PORT:-8000}"
+ALERT_EMAIL="${ALERT_EMAIL:-dennis.kittrell@percona.com}"
 
 echo "============================================"
 echo "  Percona Developer Knowledge - Remote Setup"
@@ -92,12 +94,25 @@ EOF
 cat > "$SYSTEMD_DIR/percona-dk-ingest.service" <<EOF
 [Unit]
 Description=Percona DK daily doc ingestion
+OnFailure=percona-dk-alert.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=$INSTALL_DIR
 Environment=DOTENV_PATH=$INSTALL_DIR/.env
 ExecStart=$VENV/bin/python -m percona_dk.ingest
+EOF
+
+# Failure alert service (fires via OnFailure= above)
+cat > "$SYSTEMD_DIR/percona-dk-alert.service" <<EOF
+[Unit]
+Description=Send email alert when percona-dk-ingest fails
+
+[Service]
+Type=oneshot
+WorkingDirectory=$INSTALL_DIR
+Environment=ALERT_EMAIL=$ALERT_EMAIL
+ExecStart=$INSTALL_DIR/scripts/alert-ingest-failure.sh percona-dk-ingest.service
 EOF
 
 cat > "$SYSTEMD_DIR/percona-dk-ingest.timer" <<EOF
@@ -117,6 +132,19 @@ systemctl --user daemon-reload
 systemctl --user enable --now percona-dk-mcp.service
 systemctl --user enable --now percona-dk-api.service
 systemctl --user enable --now percona-dk-ingest.timer
+
+# Alert service is pulled in by OnFailure= — no enable needed, but warn if
+# msmtp/~/.msmtprc aren't set up so the user knows alerts will be silent.
+if ! command -v msmtp >/dev/null 2>&1; then
+    echo ""
+    echo "  [!] msmtp is not installed — ingest failure alerts will not send."
+    echo "      To enable:  sudo apt-get install -y msmtp msmtp-mta"
+fi
+if [ ! -r "$HOME/.msmtprc" ]; then
+    echo ""
+    echo "  [!] ~/.msmtprc not found — ingest failure alerts will not send."
+    echo "      See scripts/README.md (or ask claude) for setup."
+fi
 
 # Keep services running after logout
 loginctl enable-linger "$(whoami)" 2>/dev/null || true
@@ -144,4 +172,5 @@ echo "    \"url\": \"http://$HOST:$MCP_PORT/sse\""
 echo "  }"
 echo ""
 echo "Docs auto-update daily at 03:00 UTC."
+echo "Failure alerts email: $ALERT_EMAIL (requires msmtp + ~/.msmtprc)."
 echo ""

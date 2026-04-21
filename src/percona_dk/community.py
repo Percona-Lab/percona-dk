@@ -1,10 +1,10 @@
 """
 Percona Developer Knowledge - Community Content Ingestion
 
-Pulls Percona blog posts (percona.community/blog) via the WordPress REST API
-and Percona forum threads (forums.percona.com) via the Discourse sitemap +
-JSON API, chunks them, and upserts into the same ChromaDB collection used
-for docs.
+Pulls Percona blog posts (percona.community/blog) by parsing the Hugo
+sitemap and scraping post HTML, and Percona forum threads
+(forums.percona.com) via the Discourse sitemap + JSON API, chunks them,
+and upserts into the same ChromaDB collection used for docs.
 
 Blog posts and forum posts are saved as local .md files under
 REPOS_DIR/<source>/ so the existing get_percona_doc MCP tool can read them
