@@ -1,22 +1,24 @@
 # Percona Developer Knowledge (percona-dk)
 
-> **Status:** Fully functional, 22 doc repos across 7 stacks, MCP + REST API working. Supports Markdown and reStructuredText. With community interest, this could grow into an official Percona developer resource.
+> **Status:** Fully functional. 22 doc repos across 7 stacks, plus the Percona Community blog and the Percona forums. MCP + REST API working. Supports Markdown and reStructuredText. With community interest, this could grow into an official Percona developer resource.
 
-Semantic search and retrieval of Percona documentation for AI assistants and developer tools.
+Semantic search and retrieval of Percona documentation, community blog posts, and forum threads for AI assistants and developer tools.
 
-**percona-dk** ingests official Percona documentation from source (GitHub repos), chunks and embeds it locally, and exposes it via REST API and [MCP](https://modelcontextprotocol.io/) server. Your AI tools get accurate, up-to-date Percona docs, not stale training data, not fragile web scraping.
+**percona-dk** ingests three kinds of Percona knowledge — official docs from GitHub repos, blog posts from [percona.community](https://percona.community/blog/), and threads from [forums.percona.com](https://forums.percona.com) — chunks and embeds them locally, and exposes them via REST API and [MCP](https://modelcontextprotocol.io/) server. Your AI tools get accurate, up-to-date Percona knowledge, not stale training data, not fragile web scraping.
 
 **Where it helps most today:** people asking AI tools Percona questions and acting on the answers -- configuring, debugging, planning. **Where it matters most (and growing fast):** when AI tools write install scripts, Ansible playbooks, Terraform configs, or step-by-step guides for Percona products. That output goes to real infrastructure. Without percona-dk, it comes from stale training data: wrong package names, deprecated flags, missing safety checks. With percona-dk, the AI pulls from current official docs. The human still reviews and runs it, but the starting point is accurate instead of plausible.
 
 ## Why this matters
 
-It's not just about new information. Percona DK helps in three distinct ways:
+It's not just about new information. Percona DK helps in four distinct ways:
 
 1. **New features the LLM can't know about** -- PXC 8.4 added a Clone plugin for SST in April 2025. No LLM has this in training data. Without DK, the AI confidently tells you the feature doesn't exist.
 
 2. **Percona-specific products the LLM overlooks** -- Percona built a dedicated tool for Atlas-to-PSMDB migrations (Percona Link for MongoDB). Without DK, the AI recommends `mongosync` or a DIY approach. The right tool exists -- the LLM just doesn't know about it.
 
 3. **Operational details the LLM gets vaguely right but not precisely right** -- This is the most common day-to-day value. The AI gives you a reasonable answer, but DK gives you the exact flags, version constraints, setup gotchas (like needing to enable MongoDB profiling for PMM Query Analytics), and copy-paste commands from current docs. When you're writing production configs or answering a customer, "mostly right" isn't good enough.
+
+4. **Real-world troubleshooting and field wisdom the docs don't capture** -- Docs tell you what a feature does; the community tells you what actually happens when you use it. With blog posts and forum threads indexed alongside docs, the AI can surface real tuning numbers, known-good recovery procedures, reported bugs, integration patterns, and version-specific quirks that engineers have already worked through. Exact error messages from forum threads are especially valuable -- when a user pastes "[ERROR] WSREP: Failed to open backend connection", DK can surface the exact thread where someone else hit and solved it.
 
 ## Supported tools
 
@@ -103,6 +105,18 @@ Percona doc repos (GitHub)
 - **Ingestion pipeline** — clones Percona doc repos, parses Markdown and reStructuredText sections, embeds locally (no API keys needed)
 - **REST API** — `POST /search`, `GET /document/{repo}/{path}`, `GET /health`, `GET /stats`
 - **MCP server** — `search_percona_docs` and `get_percona_doc` tools for any MCP-compatible client
+
+## Content sources
+
+percona-dk indexes three kinds of content into a single searchable corpus:
+
+| Source | What it covers | Refresh |
+|---|---|---|
+| **Official docs** (GitHub) | 22 Percona product doc repos across 7 stacks | Incremental, daily |
+| **Community blog** (percona.community/blog) | ~280 long-form posts: deep dives, tuning walkthroughs, release overviews | Daily, via sitemap `lastmod` |
+| **Percona forums** (forums.percona.com) | ~16,000 Discourse topics: real-world Q&A, troubleshooting threads, configuration discussions | Daily, via sitemap `lastmod` |
+
+Blog and forum ingestion can be toggled independently in `.env` (`INGEST_BLOG=true`, `INGEST_FORUM=true`). For existing installs, re-run `percona-dk-ingest` after pulling the latest release to pick them up.
 
 ## Available repos
 
@@ -255,7 +269,8 @@ Potential next steps:
 - **Optimized for AI-assisted ops** -- Better tool descriptions and response formats as AI-generated install scripts, playbooks, and configs become standard workflow
 - **Better embeddings** — swap in a larger model for improved search quality
 - **Version-aware search** — filter results by product version (8.0 vs 8.4)
-- **Expanded corpus** — blog posts, knowledge base articles
+- **Source-type filtering** — let clients restrict searches to docs-only, community-only, or weight them differently
+- **Additional sources** — knowledge base articles, release notes archives, conference talk transcripts
 - **Hosted service** — centrally hosted API for team-wide or customer access
 
 ## License
