@@ -90,6 +90,8 @@ RestartSec=5
 WantedBy=default.target
 EOF
 
+mkdir -p "$INSTALL_DIR/data"
+
 # Daily ingestion service + timer
 cat > "$SYSTEMD_DIR/percona-dk-ingest.service" <<EOF
 [Unit]
@@ -100,7 +102,10 @@ OnFailure=percona-dk-alert.service
 Type=oneshot
 WorkingDirectory=$INSTALL_DIR
 Environment=DOTENV_PATH=$INSTALL_DIR/.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV/bin/python -m percona_dk.ingest
+StandardOutput=append:$INSTALL_DIR/data/ingest.log
+StandardError=append:$INSTALL_DIR/data/ingest.log
 EOF
 
 # Failure alert service (fires via OnFailure= above)

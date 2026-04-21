@@ -40,8 +40,11 @@ log = logging.getLogger(__name__)
 
 BLOG_BASE = os.getenv("BLOG_BASE_URL", "https://percona.community").rstrip("/")
 FORUM_BASE = os.getenv("FORUM_BASE_URL", "https://forums.percona.com").rstrip("/")
-REQUEST_DELAY = float(os.getenv("COMMUNITY_REQUEST_DELAY", "1.0"))
+REQUEST_DELAY = float(os.getenv("COMMUNITY_REQUEST_DELAY", "0.25"))
 REQUEST_TIMEOUT = 30
+# Accumulate this many chunks across topics before flushing to ChromaDB.
+# Larger = fewer embedding/upsert round-trips = much faster.
+FORUM_UPSERT_BATCH = int(os.getenv("FORUM_UPSERT_BATCH", "500"))
 STATE_FILE = DATA_DIR / ".last_ingest_community.json"
 
 BLOG_SOURCE = "percona-community-blog"
@@ -465,21 +468,39 @@ def ingest_forum(collection, state: dict) -> tuple[int, int]:
         _save_state(state)
         return 0, total_deleted
 
-    log.info("Forum: %d topics to update", len(to_update))
+    log.info("Forum: %d topics to update (batch_size=%d, delay=%.2fs)",
+             len(to_update), FORUM_UPSERT_BATCH, REQUEST_DELAY)
 
     total_added = 0
+    pending: list[dict] = []  # chunks accumulated across topics
+    t_start = time.time()
+    t_window = t_start
+    win_topics = 0
+    win_fetch_ms = 0.0
+    win_build_ms = 0.0
+
+    def _flush() -> int:
+        nonlocal pending
+        if not pending:
+            return 0
+        t0 = time.time()
+        n = _upsert_chunks(collection, pending, label=f"{FORUM_SOURCE} batch")
+        log.info("Forum: flushed %d chunks in %.1fs", n, time.time() - t0)
+        pending = []
+        return n
+
     for i, (tid, lastmod) in enumerate(to_update, 1):
+        key = str(tid)
+        tf0 = time.time()
         try:
             topic = _fetch_topic(tid)
         except requests.RequestException as e:
             log.warning("Topic %d fetch failed: %s", tid, e)
             time.sleep(REQUEST_DELAY)
             continue
-
-        key = str(tid)
+        fetch_ms = (time.time() - tf0) * 1000
 
         if topic is None:
-            # Topic inaccessible; purge any old state
             old_paths = forum_state.get(key, {}).get("file_paths", [])
             if old_paths:
                 total_deleted += _delete_chunks_for_files(collection, FORUM_SOURCE, old_paths)
@@ -491,9 +512,10 @@ def ingest_forum(collection, state: dict) -> tuple[int, int]:
             time.sleep(REQUEST_DELAY)
             continue
 
+        tb0 = time.time()
         chunks, file_paths, local_files = _build_topic_chunks(topic, categories)
+        build_ms = (time.time() - tb0) * 1000
 
-        # Delete old chunks for this topic (post numbers may have changed)
         old_paths = forum_state.get(key, {}).get("file_paths", [])
         if old_paths:
             total_deleted += _delete_chunks_for_files(collection, FORUM_SOURCE, old_paths)
@@ -506,19 +528,43 @@ def ingest_forum(collection, state: dict) -> tuple[int, int]:
         for fp, content in local_files:
             _write_local(REPOS_DIR / FORUM_SOURCE / fp, content)
 
-        if chunks:
-            total_added += _upsert_chunks(collection, chunks, label=f"{FORUM_SOURCE} t/{tid}")
-
+        pending.extend(chunks)
         forum_state[key] = {"bumped_at": lastmod, "file_paths": file_paths}
 
-        if i % 50 == 0:
+        win_topics += 1
+        win_fetch_ms += fetch_ms
+        win_build_ms += build_ms
+
+        # Flush when batch is full
+        if len(pending) >= FORUM_UPSERT_BATCH:
+            total_added += _flush()
             _save_state(state)
-            log.info("Forum progress: %d/%d topics (+%d chunks so far)",
-                     i, len(to_update), total_added)
+
+        # Periodic progress log + rate window
+        if i % 100 == 0:
+            now = time.time()
+            window_elapsed = now - t_window
+            overall = now - t_start
+            rate = win_topics / window_elapsed if window_elapsed > 0 else 0
+            eta_min = (len(to_update) - i) / rate / 60 if rate > 0 else -1
+            log.info(
+                "Forum %d/%d (%.1f t/s window, overall %.2fs/topic) "
+                "avg fetch=%.0fms build=%.0fms pending=%d ETA=%.0fmin",
+                i, len(to_update), rate, overall / i,
+                win_fetch_ms / win_topics, win_build_ms / win_topics,
+                len(pending), eta_min,
+            )
+            t_window = now
+            win_topics = 0
+            win_fetch_ms = 0.0
+            win_build_ms = 0.0
+            _save_state(state)
 
         time.sleep(REQUEST_DELAY)
 
+    total_added += _flush()
     _save_state(state)
+    log.info("Forum: done in %.1fs, %d chunks added", time.time() - t_start, total_added)
     return total_added, total_deleted
 
 
