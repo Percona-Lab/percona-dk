@@ -351,8 +351,12 @@ def setup_venv(install_dir: Path) -> None:
 # Step 6: .env setup
 # ---------------------------------------------------------------------------
 
-def setup_env_file(install_dir: Path) -> tuple[list, int]:
-    """Copy .env.example if needed. Return (existing_repos, existing_refresh_days)."""
+def setup_env_file(install_dir: Path) -> tuple[list, int, str | None]:
+    """Copy .env.example if needed.
+
+    Returns (existing_repos, existing_refresh_days, existing_mode).
+    existing_mode is 'shim', 'local', or None if not set yet.
+    """
     env_path = install_dir / ".env"
     example_path = install_dir / ".env.example"
 
@@ -380,7 +384,47 @@ def setup_env_file(install_dir: Path) -> tuple[list, int]:
     if refresh_match:
         existing_refresh = int(refresh_match.group(1))
 
-    return existing_repos, existing_refresh
+    # Parse existing MODE= (shim|local)
+    existing_mode: str | None = None
+    mode_match = re.search(r"^MODE=(\w+)", content, re.MULTILINE)
+    if mode_match:
+        v = mode_match.group(1).strip().lower()
+        if v in ("shim", "local"):
+            existing_mode = v
+
+    return existing_repos, existing_refresh, existing_mode
+
+
+def ask_mode(existing_mode: str | None) -> str:
+    """Ask which install mode to use. Returns 'shim' or 'local'."""
+    print()
+    print(c(BOLD, "Install mode"))
+    print()
+    print("  Percona DK can be installed in two modes. Pick based on how you will use it:")
+    print()
+    print(f"  {c(BOLD, '[1] Shared instance')}  {c(DIM, '(recommended for Percona employees on VPN)')}")
+    print("       - Your AI tools talk to the shared Percona DK on sherpa.")
+    print("       - Docs, blog, and forums stay current automatically (sherpa refreshes daily).")
+    print("       - Install time: under a minute.   Disk use: ~30 MB.")
+    print("       - Requires Percona VPN to get results. Off-VPN, the connector stays")
+    print("         active and tool calls return a 'VPN required' message.")
+    print()
+    print(f"  {c(BOLD, '[2] Full local install')}")
+    print("       - Clones the Percona doc repos to your machine and builds a local index.")
+    print("       - Works completely offline once indexed.")
+    print("       - Install time: minutes to hours (initial forum ingest takes a while).")
+    print("       - Disk use: ~1 GB+ (repos + ChromaDB).")
+    print("       - Good if: you don't have VPN access, need offline capability, or")
+    print("         want to customize which repos are indexed.")
+    print()
+    default_choice = "1" if existing_mode in (None, "shim") else "2"
+    while True:
+        choice = ask("Choose [1/2]", default=default_choice).strip()
+        if choice == "1":
+            return "shim"
+        if choice == "2":
+            return "local"
+        print(f"  {YELLOW}Please enter 1 or 2.{NC}")
 
 # ---------------------------------------------------------------------------
 # Step 7: Fetch .md file counts from GitHub API in parallel
@@ -550,13 +594,19 @@ def ask_refresh_days(existing_refresh: int) -> int:
 # Step 10: Write .env
 # ---------------------------------------------------------------------------
 
-def write_env(install_dir: Path, selected_repos: list, refresh_days: int) -> None:
+def write_env(install_dir: Path, mode: str, selected_repos: list, refresh_days: int) -> None:
     env_path = install_dir / ".env"
     content = env_path.read_text()
 
+    # Update or append MODE=
+    if re.search(r"^MODE=", content, re.MULTILINE):
+        content = re.sub(r"^MODE=.*$", f"MODE={mode}", content, flags=re.MULTILINE)
+    else:
+        content += f"\nMODE={mode}\n"
+
     repos_value = ",".join(selected_repos)
 
-    # Update or append REPOS=
+    # Update or append REPOS= (harmless in shim mode; kept so switching modes later works)
     if re.search(r"^REPOS=", content, re.MULTILINE):
         content = re.sub(r"^REPOS=.*$", f"REPOS={repos_value}", content, flags=re.MULTILINE)
     else:
@@ -576,27 +626,31 @@ def write_env(install_dir: Path, selected_repos: list, refresh_days: int) -> Non
 # Step 11: AI client configuration
 # ---------------------------------------------------------------------------
 
-def build_mcp_entry(install_dir: Path) -> dict:
+def build_mcp_entry(install_dir: Path, mode: str = "shim") -> dict:
     """Return the Claude Desktop / Claude Code MCP config for this install.
 
-    Uses the local-stdio remote shim (percona_dk.mcp_remote_shim), which
-    forwards tool calls to the shared Percona DK instance on sherpa via
-    its REST API. Off-VPN, tool calls return a friendly "VPN required"
-    message instead of the client showing "Server disconnected". The
-    connector itself stays green because the stdio MCP process keeps
-    running regardless of network state.
+    mode='shim'  -> percona_dk.mcp_remote_shim: forwards tool calls to the
+                    shared Percona DK on sherpa via REST. Off-VPN, tool
+                    calls return a "VPN required" message instead of
+                    crashing; the connector stays green.
+    mode='local' -> percona_dk.mcp_server: serves from the local ChromaDB
+                    built by `percona-dk-ingest`. Works offline.
     """
     venv = install_dir / ".venv"
     py = python_in_venv(venv)
     env_path = install_dir / ".env"
+    module = (
+        "percona_dk.mcp_remote_shim" if mode == "shim"
+        else "percona_dk.mcp_server"
+    )
     return {
         "command": str(py),
-        "args": ["-m", "percona_dk.mcp_remote_shim"],
+        "args": ["-m", module],
         "env": {"DOTENV_PATH": str(env_path)},
     }
 
 
-def _configure_mcp_client(name: str, config_path: Path, install_dir: Path, detected: bool) -> bool:
+def _configure_mcp_client(name: str, config_path: Path, install_dir: Path, detected: bool, mode: str = "shim") -> bool:
     """Configure an MCP client. Returns True if configured."""
     if not detected:
         print(f"  {DIM}{name} not detected ({config_path.parent}){NC}")
@@ -614,7 +668,7 @@ def _configure_mcp_client(name: str, config_path: Path, install_dir: Path, detec
             warn(f"Could not parse {config_path} - will overwrite.")
 
     config.setdefault("mcpServers", {})
-    config["mcpServers"]["percona-dk"] = build_mcp_entry(install_dir)
+    config["mcpServers"]["percona-dk"] = build_mcp_entry(install_dir, mode=mode)
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
     info(f"Configured {name}: {config_path}")
@@ -653,7 +707,7 @@ def _get_ai_clients() -> list[dict]:
     return clients
 
 
-def configure_ai_clients(install_dir: Path) -> bool:
+def configure_ai_clients(install_dir: Path, mode: str = "shim") -> bool:
     """Configure all detected AI clients. Returns True if any were configured."""
     print(c(BOLD, "Configuring AI clients..."))
     any_configured = False
@@ -667,7 +721,7 @@ def configure_ai_clients(install_dir: Path) -> bool:
         if detected:
             info(f"{name} detected - auto-configuring...")
 
-        if _configure_mcp_client(name, config_path, install_dir, detected):
+        if _configure_mcp_client(name, config_path, install_dir, detected, mode=mode):
             any_configured = True
             configured_names.append(name)
 
@@ -828,7 +882,7 @@ def send_install_analytics(install_dir: Path, selected_repos: list) -> None:
 # Step 13: Done
 # ---------------------------------------------------------------------------
 
-def print_done(any_clients_configured: bool) -> None:
+def print_done(any_clients_configured: bool, mode: str = "shim") -> None:
     print(c(BOLD, "=" * 60))
     print(c(GREEN + BOLD, " Installation complete!"))
     print(c(BOLD, "=" * 60))
@@ -837,7 +891,13 @@ def print_done(any_clients_configured: bool) -> None:
         print(f"  {YELLOW}Restart your AI assistant (Claude Desktop / Claude Code){NC}")
         print("  for the Percona DK MCP server to take effect.")
         print()
-    print("  The percona-dk MCP server is ready to use.")
+    if mode == "shim":
+        print("  Mode: Shared instance (via sherpa).")
+        print(f"  {DIM}Connect to the Percona VPN to use it. Off-VPN, the connector stays{NC}")
+        print(f"  {DIM}active and tool calls return a 'VPN required' message.{NC}")
+    else:
+        print("  Mode: Full local install.")
+        print(f"  {DIM}Ingestion has run; the index is on your machine and works offline.{NC}")
     print()
 
 # ---------------------------------------------------------------------------
@@ -847,46 +907,46 @@ def print_done(any_clients_configured: bool) -> None:
 def main() -> None:
     print_banner()
 
-    # Step 2: Prerequisites
+    # Prerequisites
     check_prerequisites()
 
-    # Step 3: Install directory
+    # Install directory
     install_dir, is_rerun = get_install_dir()
 
-    # Step 4: Clone or pull
+    # Clone or pull
     clone_or_pull(install_dir, is_rerun)
 
-    # Step 5: Venv + package
+    # Venv + package
     setup_venv(install_dir)
 
-    # Step 6: .env
-    existing_repos, existing_refresh = setup_env_file(install_dir)
+    # .env
+    existing_repos, existing_refresh, existing_mode = setup_env_file(install_dir)
 
-    # Step 7: Fetch MD counts in parallel
+    # Mode selection (shim vs full local)
+    mode = ask_mode(existing_mode)
+
+    if mode == "shim":
+        # Shared-instance path: no local ingestion, no repo cloning of docs,
+        # no refresh schedule. Just write the .env, configure AI clients, done.
+        write_env(install_dir, mode=mode, selected_repos=existing_repos, refresh_days=existing_refresh)
+        any_configured = configure_ai_clients(install_dir, mode=mode)
+        send_install_analytics(install_dir, selected_repos=[])
+        print_done(any_configured, mode=mode)
+        return
+
+    # Full local install path
     md_counts = fetch_all_md_counts()
-
-    # Step 8: Stack selection
     selected_repos = select_repos(md_counts, existing_repos)
 
-    # Step 9: Refresh days
     print(c(BOLD, "Auto-refresh settings"))
     refresh_days = ask_refresh_days(existing_refresh)
     print()
 
-    # Step 10: Write .env
-    write_env(install_dir, selected_repos, refresh_days)
-
-    # Step 11: AI clients
-    any_configured = configure_ai_clients(install_dir)
-
-    # Step 12: Ingestion
+    write_env(install_dir, mode=mode, selected_repos=selected_repos, refresh_days=refresh_days)
+    any_configured = configure_ai_clients(install_dir, mode=mode)
     run_ingestion(install_dir, selected_repos, existing_repos, md_counts)
-
-    # Step 12b: Install analytics (fire-and-forget)
-    send_install_analytics(install_dir, selected_repos)
-
-    # Step 13: Done
-    print_done(any_configured)
+    send_install_analytics(install_dir, selected_repos=selected_repos)
+    print_done(any_configured, mode=mode)
 
 
 if __name__ == "__main__":
