@@ -577,12 +577,21 @@ def write_env(install_dir: Path, selected_repos: list, refresh_days: int) -> Non
 # ---------------------------------------------------------------------------
 
 def build_mcp_entry(install_dir: Path) -> dict:
+    """Return the Claude Desktop / Claude Code MCP config for this install.
+
+    Uses the local-stdio remote shim (percona_dk.mcp_remote_shim), which
+    forwards tool calls to the shared Percona DK instance on sherpa via
+    its REST API. Off-VPN, tool calls return a friendly "VPN required"
+    message instead of the client showing "Server disconnected". The
+    connector itself stays green because the stdio MCP process keeps
+    running regardless of network state.
+    """
     venv = install_dir / ".venv"
     py = python_in_venv(venv)
     env_path = install_dir / ".env"
     return {
         "command": str(py),
-        "args": ["-m", "percona_dk.mcp_server"],
+        "args": ["-m", "percona_dk.mcp_remote_shim"],
         "env": {"DOTENV_PATH": str(env_path)},
     }
 
