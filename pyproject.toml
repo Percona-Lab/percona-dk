@@ -28,6 +28,7 @@ dependencies = [
 percona-dk-ingest = "percona_dk.ingest:main"
 percona-dk-server = "percona_dk.server:main"
 percona-dk-mcp = "percona_dk.mcp_server:main"
+percona-dk-mcp-remote = "percona_dk.mcp_remote_shim:main"
 
 [project.optional-dependencies]
 dev = [

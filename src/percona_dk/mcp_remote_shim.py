@@ -1,0 +1,254 @@
+"""
+Percona DK - Remote Client Shim (stdio MCP)
+
+A local stdio MCP server that forwards tool calls to the shared Percona DK
+instance on sherpa via its REST API. Designed so the connector in Claude
+Desktop / Claude Code stays registered and green even when the backend is
+unreachable (off-VPN, sherpa down, etc.). Tool calls then return a
+friendly "VPN required" message as a normal tool result, instead of
+crashing the MCP process and leaving the user with a red "Server
+disconnected" banner.
+
+This matches the pattern used by other Percona internal MCP connectors
+(Clari Copilot, Vista Data), where the MCP server runs locally but its
+backing data is on VPN.
+
+Configuration
+=============
+PERCONA_DK_BACKEND  Base URL of the REST API (default:
+                    http://sherpa.tp.int.percona.com:8000)
+PERCONA_DK_TIMEOUT  Per-request timeout in seconds (default: 15)
+
+Install
+=======
+Runs via `uvx` straight from the repo, no persistent install required:
+
+    uvx --from git+https://github.com/Percona-Lab/percona-dk percona-dk-mcp-remote
+
+Claude Desktop config:
+
+    {
+      "mcpServers": {
+        "percona-dk": {
+          "command": "uvx",
+          "args": [
+            "--from",
+            "git+https://github.com/Percona-Lab/percona-dk",
+            "percona-dk-mcp-remote"
+          ]
+        }
+      }
+    }
+
+Claude Code:
+
+    claude mcp add percona-dk -- uvx --from \\
+        git+https://github.com/Percona-Lab/percona-dk percona-dk-mcp-remote
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+import requests
+from fastmcp import FastMCP
+
+BACKEND_URL = os.getenv(
+    "PERCONA_DK_BACKEND",
+    "http://sherpa.tp.int.percona.com:8000",
+).rstrip("/")
+
+REQUEST_TIMEOUT = float(os.getenv("PERCONA_DK_TIMEOUT", "15"))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger(__name__)
+
+
+_VPN_MESSAGE = (
+    "**Percona DK backend is unreachable.**\n\n"
+    "This connector forwards queries to the shared Percona DK instance on "
+    "the internal Percona network, which requires VPN access.\n\n"
+    "**What to do:**\n"
+    "1. Connect to the Percona VPN.\n"
+    "2. Re-run your query.\n\n"
+    f"If you are on the VPN and still see this, the shared instance at "
+    f"`{BACKEND_URL}` may be down; ping in Slack or fall back to a local "
+    f"install of percona-dk."
+)
+
+
+def _vpn_error_with_detail(detail: str) -> str:
+    return f"{_VPN_MESSAGE}\n\n*Technical detail:* {detail}"
+
+
+def _format_search_results(data: dict) -> str:
+    """Render the REST /search JSON response as markdown that matches
+    the native MCP tool's output format."""
+    results = data.get("results") or []
+    if not results:
+        msg = "No results found for your query."
+        suggestion = data.get("suggestion")
+        if suggestion:
+            msg += f"\n\n{suggestion}"
+        return msg
+
+    parts: list[str] = []
+    for i, r in enumerate(results, 1):
+        parts.append(
+            f"### Result {i} (relevance: {r.get('score', '?')})\n"
+            f"**Source:** {r.get('source_repo', '')} - `{r.get('file_path', '')}`\n"
+            f"**Section:** {r.get('heading_hierarchy', '')}\n"
+            f"**URL:** {r.get('page_url', '')}\n\n"
+            f"{r.get('text', '')}\n"
+        )
+    output = "\n---\n".join(parts)
+
+    suggestion = data.get("suggestion")
+    if suggestion:
+        output += f"\n\n{suggestion}"
+    return output
+
+
+# ---------------------------------------------------------------------------
+# MCP server definition
+# ---------------------------------------------------------------------------
+
+mcp = FastMCP(
+    "Percona Developer Knowledge",
+    instructions=(
+        "Search and retrieve Percona knowledge: official product documentation, "
+        "posts from the Percona Community blog (percona.community/blog), and threads "
+        "from the Percona forums (forums.percona.com). Use this for any Percona "
+        "product question including configuration, troubleshooting, exact error "
+        "messages, tuning advice, integration patterns, and migration experiences. "
+        "Note: this connector reaches a shared instance on the Percona internal "
+        "network and requires VPN access; tool calls will return a VPN-required "
+        "message when the backend is unreachable."
+    ),
+)
+
+
+@mcp.tool()
+def search_percona_docs(query: str, top_k: int = 5) -> str:
+    """Semantic search across Percona docs, blog, and forum threads.
+
+    This tool searches a single combined corpus that includes:
+      - Official Percona documentation (all product repos on GitHub)
+      - Percona Community blog posts (percona.community/blog)
+      - Percona forum threads (forums.percona.com) - real-world Q&A,
+        troubleshooting discussions, and community-reported issues
+
+    Use this tool for ANY Percona-related question: configuration,
+    troubleshooting, exact error messages, tuning advice, integration
+    patterns, migration experiences, version-specific quirks. You do NOT
+    need to fall back to generic web search for forum or community
+    discussions - they are already indexed here. Each result indicates
+    its source (product doc repo, "percona-community-blog", or
+    "percona-forums") so the caller can weigh official vs. community
+    content appropriately.
+
+    Note: this connector requires the Percona VPN. If the backend is
+    unreachable, the tool returns a VPN-required message instead of
+    search results.
+
+    Args:
+        query: Natural language search query. Can include exact error
+               strings ("WSREP: Failed to open backend connection"),
+               product names, configuration flags, or full questions.
+        top_k: Number of results to return (1-20, default 5).
+    """
+    top_k = max(1, min(int(top_k), 20))
+    try:
+        resp = requests.post(
+            f"{BACKEND_URL}/search",
+            json={"query": query, "top_k": top_k},
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return _format_search_results(resp.json())
+    except requests.ConnectionError as e:
+        log.warning("Backend unreachable: %s", e)
+        return _vpn_error_with_detail(f"connection error reaching {BACKEND_URL}")
+    except requests.Timeout:
+        return _vpn_error_with_detail(
+            f"request timed out after {REQUEST_TIMEOUT}s"
+        )
+    except requests.HTTPError as e:
+        status = getattr(e.response, "status_code", "?")
+        body = ""
+        try:
+            body = e.response.text[:500]
+        except Exception:
+            pass
+        return (
+            f"Percona DK backend returned HTTP {status}.\n\n"
+            f"Backend: `{BACKEND_URL}`\n\n*Body:* {body}"
+        )
+    except Exception as e:
+        log.exception("Unexpected error in search_percona_docs")
+        return f"Unexpected error calling Percona DK: {type(e).__name__}: {e}"
+
+
+@mcp.tool()
+def get_percona_doc(repo: str, path: str) -> str:
+    """Retrieve the full content of a specific Percona doc, blog post,
+    or forum thread.
+
+    Use this when you already know which page you want (e.g. from a
+    previous search result) and need the complete content.
+
+    Args:
+        repo: Repository short name, e.g. 'psmysql-docs', 'pxc-docs',
+              'pmm-doc'. For community content, use
+              'percona-community-blog' or 'percona-forums'.
+        path: File path within the repo, e.g.
+              'docs/innodb-show-status.md', 'posts/{slug}.md', or
+              't/{topic_id}/{post_number}.md' for a specific forum post.
+    """
+    try:
+        resp = requests.get(
+            f"{BACKEND_URL}/document/{repo}/{path}",
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and "content" in data:
+            return data["content"]
+        return str(data)
+    except requests.ConnectionError as e:
+        log.warning("Backend unreachable: %s", e)
+        return _vpn_error_with_detail(f"connection error reaching {BACKEND_URL}")
+    except requests.Timeout:
+        return _vpn_error_with_detail(
+            f"request timed out after {REQUEST_TIMEOUT}s"
+        )
+    except requests.HTTPError as e:
+        status = getattr(e.response, "status_code", "?")
+        if status == 404:
+            return f"Document not found: `{repo}/{path}`"
+        body = ""
+        try:
+            body = e.response.text[:500]
+        except Exception:
+            pass
+        return (
+            f"Percona DK backend returned HTTP {status}.\n\n"
+            f"Backend: `{BACKEND_URL}`\n\n*Body:* {body}"
+        )
+    except Exception as e:
+        log.exception("Unexpected error in get_percona_doc")
+        return f"Unexpected error calling Percona DK: {type(e).__name__}: {e}"
+
+
+def main():
+    """CLI entrypoint for `percona-dk-mcp-remote` (stdio MCP)."""
+    log.info("Percona DK remote shim starting; backend=%s", BACKEND_URL)
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
