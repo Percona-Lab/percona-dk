@@ -68,17 +68,21 @@ curl -fsSL https://raw.githubusercontent.com/Percona-Lab/percona-dk/main/install
 irm https://raw.githubusercontent.com/Percona-Lab/percona-dk/main/install-percona-dk.ps1 | iex
 ```
 
-The installer handles everything:
+During install you'll be asked to choose a mode:
 
-- Installs `uv` if needed (downloads Python 3.12 automatically — no system Python required)
-- Clones the repo to `~/percona-dk`
-- Creates an isolated virtual environment
-- Walks you through selecting which doc repos to index (grouped by product stack, with live size estimates)
-- Asks how often to auto-sync (default: every 7 days)
-- Auto-configures Claude Desktop and Claude Code
-- Runs the initial ingestion
+- **Shared instance** (recommended for Percona employees on VPN) - installs a tiny local bridge so Claude Desktop / Claude Code / Cursor / Windsurf can talk to the shared Percona DK on sherpa. Install finishes in under a minute. Docs, blog, and forums stay current automatically because sherpa refreshes daily. Requires Percona VPN to get results; off-VPN the connector stays active and tool calls return a "VPN required" message instead of breaking the client.
+- **Full local install** - clones Percona doc repos, builds a local ChromaDB index, runs a local MCP server against it. Works completely offline once indexed. First-run takes minutes to hours depending on how many sources are selected. Use this if you don't have VPN access, want offline capability, or want to customize which repos are indexed.
 
-Safe to re-run — detects existing installs, preserves your config, and pre-selects repos you already have indexed.
+The installer handles everything for the mode you pick:
+
+- Installs `uv` if needed (downloads Python 3.12 automatically - no system Python required)
+- Clones the repo to `~/percona-dk` and creates an isolated virtual environment
+- Auto-configures Claude Desktop, Claude Code, Cursor, and Windsurf
+- (Local mode only) Walks you through which doc repos to index, runs initial ingestion, sets up auto-refresh
+
+Safe to re-run - detects existing installs, preserves your config, and pre-selects the mode you chose previously.
+
+> **Note:** In Percona's Claude Teams workspace, user-added custom connectors are disabled at the org level. That means you cannot point Claude Desktop or claude.ai directly at `http://sherpa.tp.int.percona.com:8402/sse` via Settings > Connectors. The curl installer above is the supported path because it writes the MCP entry to Claude Desktop / Claude Code's local config file, which is not subject to the custom-connector policy.
 
 ## What it does
 
