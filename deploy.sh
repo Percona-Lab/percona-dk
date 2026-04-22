@@ -93,6 +93,12 @@ EOF
 mkdir -p "$INSTALL_DIR/data"
 
 # Daily ingestion service + timer
+#
+# ExecStartPost restarts the REST API and MCP server so they reload their
+# in-memory ChromaDB HNSW index and see newly-ingested chunks. Without this,
+# those long-running services keep serving from a stale index even though
+# the underlying SQLite already has the new data. "try-restart" is a no-op
+# if the service isn't running.
 cat > "$SYSTEMD_DIR/percona-dk-ingest.service" <<EOF
 [Unit]
 Description=Percona DK daily doc ingestion
@@ -104,6 +110,7 @@ WorkingDirectory=$INSTALL_DIR
 Environment=DOTENV_PATH=$INSTALL_DIR/.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV/bin/python -m percona_dk.ingest
+ExecStartPost=/usr/bin/systemctl --user try-restart percona-dk-api.service percona-dk-mcp.service
 StandardOutput=append:$INSTALL_DIR/data/ingest.log
 StandardError=append:$INSTALL_DIR/data/ingest.log
 EOF
