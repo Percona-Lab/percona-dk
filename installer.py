@@ -848,7 +848,7 @@ def _get_dk_version(install_dir: Path) -> str:
     return "unknown"
 
 
-def send_install_analytics(install_dir: Path, selected_repos: list) -> None:
+def send_install_analytics(install_dir: Path, selected_repos: list, mode: str = "shim") -> None:
     """Fire-and-forget install analytics. Runs in background thread, never blocks."""
 
 
@@ -861,6 +861,7 @@ def send_install_analytics(install_dir: Path, selected_repos: list) -> None:
 
             payload = json.dumps({
                 "action": "install",
+                "mode": mode,
                 "machine_hash": _get_machine_hash(),
                 "app_version": _get_dk_version(install_dir),
                 "os_version": f"{platform.system()} {platform.release()}",
@@ -931,7 +932,7 @@ def main() -> None:
         # no refresh schedule. Just write the .env, configure AI clients, done.
         write_env(install_dir, mode=mode, selected_repos=existing_repos, refresh_days=existing_refresh)
         any_configured = configure_ai_clients(install_dir, mode=mode)
-        send_install_analytics(install_dir, selected_repos=[])
+        send_install_analytics(install_dir, selected_repos=[], mode=mode)
         print_done(any_configured, mode=mode)
         return
 
@@ -946,7 +947,7 @@ def main() -> None:
     write_env(install_dir, mode=mode, selected_repos=selected_repos, refresh_days=refresh_days)
     any_configured = configure_ai_clients(install_dir, mode=mode)
     run_ingestion(install_dir, selected_repos, existing_repos, md_counts)
-    send_install_analytics(install_dir, selected_repos=selected_repos)
+    send_install_analytics(install_dir, selected_repos=selected_repos, mode=mode)
     print_done(any_configured, mode=mode)
 
 
