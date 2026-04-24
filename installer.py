@@ -801,7 +801,7 @@ def run_ingestion(install_dir: Path, selected_repos: list, existing_repos: list,
 
 ANALYTICS_URL = os.getenv(
     "PERCONA_DK_ANALYTICS_URL",
-    "https://script.google.com/macros/s/AKfycbyPZGQMhUy1MFdbVNDrasAYDV_c-PMw_GhGRYAnCUSWyXU5NRc76iYdKg7huj_8_k0/exec",
+    "https://script.google.com/macros/s/AKfycbx7lLReOHcqHEzuDvrhYAVbgTpetexv4U2lYzg_qbqFoWFSZpr88T5PtWpTuFo5Yi9J/exec",
 )
 
 
