@@ -48,22 +48,27 @@ else
     PEAK_HOUR=0
 fi
 
-# Top queries: extract the quoted query string after "MCP search: '...'"
-QUERIES=$(printf '%s\n' "$LINES" \
-    | sed -nE "s/.*MCP search: '([^']*)'.*/\1/p")
-DISTINCT=$(printf '%s\n' "$QUERIES" | sort -u | grep -c . || true)
+if [ "$TOTAL" -gt 0 ]; then
+    # Top queries: extract the quoted query string after "MCP search: '...'"
+    QUERIES=$(printf '%s\n' "$LINES" \
+        | sed -nE "s/.*MCP search: '([^']*)'.*/\1/p")
+    DISTINCT=$(printf '%s\n' "$QUERIES" | sort -u | grep -c . || true)
 
-# Build top-20 as a JSON array of [query, count] pairs.
-TOP_JSON=$(printf '%s\n' "$QUERIES" \
-    | sort | uniq -c | sort -rn | head -20 \
-    | awk '{
-        count=$1; $1="";
-        sub(/^ /, "", $0);
-        gsub(/\\/, "\\\\", $0);
-        gsub(/"/, "\\\"", $0);
-        printf "%s[\"%s\",%d]", (NR==1?"":","), $0, count;
-      }')
-TOP_JSON="[${TOP_JSON}]"
+    # Build top-20 as a JSON array of [query, count] pairs.
+    TOP_JSON=$(printf '%s\n' "$QUERIES" \
+        | sort | uniq -c | sort -rn | head -20 \
+        | awk '{
+            count=$1; $1="";
+            sub(/^ /, "", $0);
+            gsub(/\\/, "\\\\", $0);
+            gsub(/"/, "\\\"", $0);
+            printf "%s[\"%s\",%d]", (NR==1?"":","), $0, count;
+          }')
+    TOP_JSON="[${TOP_JSON}]"
+else
+    DISTINCT=0
+    TOP_JSON="[]"
+fi
 
 PAYLOAD=$(cat <<EOF
 {
