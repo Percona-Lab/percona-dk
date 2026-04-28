@@ -14,6 +14,8 @@ from pathlib import Path
 import chromadb
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 # Try to load .env from multiple locations so the server works
 # regardless of working directory (e.g. when launched by Claude Desktop).
@@ -46,6 +48,8 @@ CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
 REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "7"))  # auto-refresh if older than N days
 LAST_INGEST_FILE = DATA_DIR / ".last_ingest"
+
+_startup_time = time.time()
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +114,22 @@ mcp = FastMCP(
 def _get_collection() -> chromadb.Collection:
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     return client.get_collection(COLLECTION_NAME)
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    """Lightweight health check for monitoring (returns doc count + uptime)."""
+    try:
+        doc_count = _get_collection().count()
+        status = "ok"
+    except Exception:
+        doc_count = 0
+        status = "degraded"
+    return JSONResponse({
+        "status": status,
+        "doc_count": doc_count,
+        "uptime_seconds": round(time.time() - _startup_time, 1),
+    })
 
 
 @mcp.tool()
