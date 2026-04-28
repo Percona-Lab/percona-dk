@@ -1,0 +1,10 @@
+[Unit]
+Description=Run daily MCP usage report at 00:05 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:05:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

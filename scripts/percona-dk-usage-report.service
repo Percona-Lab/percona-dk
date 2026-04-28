@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily MCP usage report to Google Sheets webhook
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dennis.kittrell/percona-dk
+ExecStart=/home/dennis.kittrell/percona-dk/scripts/report-mcp-usage.sh
