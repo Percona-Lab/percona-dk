@@ -72,13 +72,20 @@ EOF
 
 echo "report: ${DATE} total=${TOTAL} peak=${PEAK_HOUR}h(${PEAK_COUNT}) distinct=${DISTINCT}"
 
-RESP=$(curl -sS -X POST "$WEBHOOK_URL" \
+# Apps Script returns 302 on successful POST (redirect to a one-shot result
+# page we do not need to read). Treat 302 as success; do not follow.
+CODE=$(curl -sS -X POST "$WEBHOOK_URL" \
     -H "Content-Type: application/json" \
-    -L \
     --max-time 30 \
+    -o /dev/null \
+    -w "%{http_code}" \
     --data "$PAYLOAD" 2>&1) || {
-    echo "report: POST failed: $RESP" >&2
+    echo "report: POST failed (curl exit nonzero)" >&2
     exit 0
 }
-echo "report: webhook response: $RESP"
+
+case "$CODE" in
+    200|302) echo "report: webhook accepted (HTTP $CODE)" ;;
+    *)       echo "report: webhook unexpected HTTP $CODE" >&2 ;;
+esac
 exit 0
