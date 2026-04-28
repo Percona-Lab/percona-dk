@@ -5,18 +5,10 @@
  *   Deploy > New deployment > Type: Web app
  *   Execute as: Me
  *   Who has access: Anyone
- * Copy the resulting /exec URL and give it to the sherpa cron.
+ * After any code change: Deploy > Manage deployments > edit > Version: New version.
  *
- * Expected POST body (JSON):
- *   {
- *     "secret": "<shared secret>",
- *     "date": "2026-04-28",
- *     "total_searches": 142,
- *     "peak_hour": 14,
- *     "peak_hour_count": 38,
- *     "distinct_queries": 89,
- *     "top_queries": [["wsrep error", 7], ["pmm install", 4], ...]
- *   }
+ * Upserts by date: re-running for a date that already exists replaces the
+ * existing rows rather than appending duplicates.
  */
 
 // CHANGE THIS to a long random string. Must match WEBHOOK_SECRET on sherpa.
@@ -31,8 +23,8 @@ function doPost(e) {
     }
 
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    appendDailyUsage_(ss, body);
-    appendTopQueries_(ss, body);
+    upsertDailyUsage_(ss, body);
+    upsertTopQueries_(ss, body);
 
     return ContentService.createTextOutput("ok")
       .setMimeType(ContentService.MimeType.TEXT);
@@ -42,7 +34,7 @@ function doPost(e) {
   }
 }
 
-function appendDailyUsage_(ss, body) {
+function upsertDailyUsage_(ss, body) {
   var sheet = ss.getSheetByName("Daily Usage");
   if (!sheet) {
     sheet = ss.insertSheet("Daily Usage");
@@ -51,26 +43,69 @@ function appendDailyUsage_(ss, body) {
     ]);
     sheet.getRange("A1:E1").setFontWeight("bold");
   }
-  sheet.appendRow([
+  var row = [
     body.date,
     body.total_searches,
     body.peak_hour,
     body.peak_hour_count,
     body.distinct_queries
-  ]);
+  ];
+  var existingRow = findRowByDate_(sheet, body.date);
+  if (existingRow > 0) {
+    sheet.getRange(existingRow, 1, 1, row.length).setValues([row]);
+  } else {
+    sheet.appendRow(row);
+  }
 }
 
-function appendTopQueries_(ss, body) {
+function upsertTopQueries_(ss, body) {
   var sheet = ss.getSheetByName("Top Queries");
   if (!sheet) {
     sheet = ss.insertSheet("Top Queries");
     sheet.appendRow(["Date", "Query", "Count"]);
     sheet.getRange("A1:C1").setFontWeight("bold");
   }
+  deleteRowsByDate_(sheet, body.date);
   var rows = (body.top_queries || []).map(function (pair) {
     return [body.date, pair[0], pair[1]];
   });
   if (rows.length > 0) {
     sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 3).setValues(rows);
   }
+}
+
+// Returns the 1-based row number whose column A matches the given date,
+// or 0 if not found. Skips header row.
+function findRowByDate_(sheet, date) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+  var values = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (var i = 0; i < values.length; i++) {
+    if (formatDateCell_(values[i][0]) === date) {
+      return i + 2;
+    }
+  }
+  return 0;
+}
+
+// Deletes every data row whose column A matches the given date.
+// Iterates bottom-up so row indices stay valid.
+function deleteRowsByDate_(sheet, date) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  var values = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (var i = values.length - 1; i >= 0; i--) {
+    if (formatDateCell_(values[i][0]) === date) {
+      sheet.deleteRow(i + 2);
+    }
+  }
+}
+
+// Cell values come back as either Date objects (if Sheets auto-parsed the
+// ISO date) or strings. Normalize to "YYYY-MM-DD" for comparison.
+function formatDateCell_(v) {
+  if (v instanceof Date) {
+    return Utilities.formatDate(v, "UTC", "yyyy-MM-dd");
+  }
+  return String(v);
 }
