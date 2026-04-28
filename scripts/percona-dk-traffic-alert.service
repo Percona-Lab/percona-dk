@@ -1,0 +1,11 @@
+[Unit]
+Description=Check MCP traffic and email if above threshold
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dennis.kittrell/percona-dk
+Environment=ALERT_EMAIL=dennis.kittrell@percona.com
+Environment=WINDOW_MIN=15
+Environment=THRESHOLD=50
+Environment=COOLDOWN_MIN=60
+ExecStart=/home/dennis.kittrell/percona-dk/scripts/alert-mcp-traffic.sh
