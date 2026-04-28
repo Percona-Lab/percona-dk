@@ -20,25 +20,33 @@ if [ -z "${WEBHOOK_URL:-}" ] || [ -z "${WEBHOOK_SECRET:-}" ]; then
     exit 0
 fi
 
-# Yesterday in UTC (the day we're reporting on).
-DATE=$(date -u -d 'yesterday' '+%Y-%m-%d')
+# Date to report on. Defaults to yesterday in UTC; first arg overrides
+# (used by the backfill loop). Format: YYYY-MM-DD.
+DATE="${1:-$(date -u -d 'yesterday' '+%Y-%m-%d')}"
 SINCE="${DATE} 00:00:00 UTC"
 UNTIL="${DATE} 23:59:59 UTC"
 
-LINES=$(journalctl --user -u percona-dk-mcp.service \
+# The MCP service runs as a systemd --user service but its stdout/stderr
+# end up in the system journal, which the dennis.kittrell user cannot read
+# without sudo. Passwordless sudo for journalctl is configured.
+LINES=$(sudo -n journalctl _SYSTEMD_USER_UNIT=percona-dk-mcp.service \
     --since "$SINCE" --until "$UNTIL" --no-pager 2>/dev/null \
     | grep "MCP search:" || true)
 
 TOTAL=$(printf '%s\n' "$LINES" | grep -c "MCP search:" || true)
+TOTAL=${TOTAL:-0}
 
-# Hour buckets from the systemd timestamp (e.g. "Apr 28 14:23:11").
-PEAK=$(printf '%s\n' "$LINES" \
-    | awk '{print $3}' | cut -d: -f1 \
-    | sort | uniq -c | sort -rn | head -1)
-PEAK_COUNT=$(echo "$PEAK" | awk '{print $1}')
-PEAK_HOUR=$(echo "$PEAK" | awk '{print $2}')
-PEAK_COUNT=${PEAK_COUNT:-0}
-PEAK_HOUR=${PEAK_HOUR:-0}
+if [ "$TOTAL" -gt 0 ]; then
+    # Hour buckets from the systemd timestamp (e.g. "Apr 28 14:23:11").
+    PEAK=$(printf '%s\n' "$LINES" \
+        | awk '{print $3}' | cut -d: -f1 \
+        | sort | uniq -c | sort -rn | head -1)
+    PEAK_COUNT=$(echo "$PEAK" | awk '{print $1}')
+    PEAK_HOUR=$(echo "$PEAK" | awk '{print $2}')
+else
+    PEAK_COUNT=0
+    PEAK_HOUR=0
+fi
 
 # Top queries: extract the quoted query string after "MCP search: '...'"
 QUERIES=$(printf '%s\n' "$LINES" \

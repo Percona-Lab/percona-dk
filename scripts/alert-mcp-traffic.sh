@@ -17,7 +17,7 @@ TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 mkdir -p "$(dirname "$COOLDOWN_FILE")"
 
-COUNT=$(journalctl --user -u percona-dk-mcp.service \
+COUNT=$(sudo -n journalctl _SYSTEMD_USER_UNIT=percona-dk-mcp.service \
     --since "${WINDOW_MIN} min ago" --no-pager 2>/dev/null \
     | grep -c "MCP search:" || true)
 
@@ -42,7 +42,7 @@ if ! command -v msmtp >/dev/null 2>&1 || [ ! -r "$HOME/.msmtprc" ]; then
     exit 0
 fi
 
-TOP_QUERIES=$(journalctl --user -u percona-dk-mcp.service \
+TOP_QUERIES=$(sudo -n journalctl _SYSTEMD_USER_UNIT=percona-dk-mcp.service \
     --since "${WINDOW_MIN} min ago" --no-pager 2>/dev/null \
     | grep "MCP search:" \
     | sed -E "s/.*MCP search: '([^']*)'.*/\1/" \
