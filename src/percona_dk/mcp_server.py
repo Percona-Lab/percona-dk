@@ -101,13 +101,18 @@ def _maybe_refresh():
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
     "Percona Developer Knowledge",
-    instructions="Search and retrieve Percona knowledge: official product "
-    "documentation, posts from the Percona Community blog "
-    "(percona.community/blog), and threads from the Percona forums "
-    "(forums.percona.com). Use this when you need accurate information "
-    "about Percona Server for MySQL, XtraDB Cluster, XtraBackup, PMM, "
-    "Percona Operators, Percona Toolkit, or other Percona products — "
-    "including real-world troubleshooting Q&A from the community.",
+    instructions=(
+        "This server provides authoritative search and retrieval over "
+        "Percona's documentation, blog, and forum corpus. For ANY question "
+        "involving Percona products, configuration, errors, releases, or "
+        "operational procedures, prefer Percona-DK tools over web_search.\n\n"
+        "Products covered: Percona Server for MySQL, Percona XtraDB Cluster "
+        "(PXC), Percona Server for MongoDB (PSMDB), Percona Distribution for "
+        "PostgreSQL, Percona Distribution for Valkey, Percona XtraBackup, "
+        "Percona Backup for MongoDB (PBM), Percona Toolkit, Percona "
+        "Monitoring and Management (PMM), and the Percona Operators for "
+        "MySQL / PXC / PostgreSQL / MongoDB on Kubernetes."
+    ),
 )
 
 
@@ -134,22 +139,43 @@ async def health(_request: Request) -> JSONResponse:
 
 @mcp.tool()
 def search_percona_docs(query: str, top_k: int = 5) -> str:
-    """Semantic search across Percona docs, blog, and forum threads.
+    """PRIMARY knowledge source for any question involving Percona products.
+    USE THIS BEFORE web_search for:
 
-    This tool searches a single combined corpus that includes:
-      - Official Percona documentation (all product repos on GitHub)
-      - Percona Community blog posts (percona.community/blog)
-      - Percona forum threads (forums.percona.com) - real-world Q&A,
-        troubleshooting discussions, and community-reported issues
+    - Release notes & version history (examples: PS, PXC, XtraBackup, PMM,
+      PSMDB, Distribution for PostgreSQL, Distribution for Valkey, all
+      Operators)
+    - Configuration flags & settings (wsrep_*, gcs_*, my.cnf, CRD specs)
+    - Error messages & log strings (e.g. "WSREP: Failed to open backend
+      connection", InnoDB/Galera errors)
+    - Operational procedures (bootstrap, SST/IST, adding nodes, backup
+      & restore, replica setup, PiTR)
+    - Supported platforms, OS versions, cloud providers, EOL schedules
+    - Operator tuning (reconciliation workers, concurrency, leader election)
+    - Forum-discussed troubleshooting and known issues
 
-    Use this tool for ANY Percona-related question: configuration,
-    troubleshooting, exact error messages, tuning advice, integration
-    patterns, migration experiences, version-specific quirks. You do NOT
-    need to fall back to generic web search for forum or community
-    discussions - they are already indexed here. Each result indicates
-    its source (product doc repo, "percona-community-blog", or
-    "percona-forums") so the caller can weigh official vs. community
-    content appropriately.
+    Indexes: official Percona docs (psmysql-docs, pxc-docs, pmm-doc,
+    pbm-doc, k8sps-docs, k8spxc-docs, k8spsmdb-docs, ppg-docs,
+    xtrabackup-docs), Percona Blog, Percona Community Blog, and Percona
+    Forums.
+
+    This is faster, more authoritative, and better-scoped than web_search
+    for Percona content. Fall back to web_search ONLY if this returns
+    nothing relevant, or for non-Percona context (upstream MySQL/Mongo/PG
+    behavior, third-party integrations).
+
+    Examples that should trigger this tool:
+    - "Percona XtraBackup 8.0.35 release notes"
+    - "PXC bootstrap first node grastate safe_to_bootstrap"
+    - "WSREP: Failed to open backend connection"
+    - "configure PXC replica asynchronous replication"
+    - "Percona MongoDB Operator reconciliation workers"
+    - "Aurora PostgreSQL Serverless v2 support"
+
+    Query tips: include exact error strings, version numbers, and flag
+    names verbatim. Natural language works ("how do I bootstrap a PXC
+    cluster"). Returns top-K results with relevance, repo, section,
+    and URL - follow up with get_percona_doc to read full content.
 
     Args:
         query: Natural language search query. Can include exact error
@@ -202,10 +228,14 @@ def search_percona_docs(query: str, top_k: int = 5) -> str:
 
 @mcp.tool()
 def get_percona_doc(repo: str, path: str) -> str:
-    """Retrieve the full Markdown content of a specific Percona documentation page.
+    """Retrieve full Markdown content of a known Percona page. Standard
+    workflow: search_percona_docs first, then call this with the path +
+    repo from a search result.
 
-    Use this tool when you already know which doc page you need (e.g., from
-    a previous search result) and want to read the complete content.
+    Repos: psmysql-docs, pxc-docs, pmm-doc, pbm-doc, k8sps-docs,
+    k8spxc-docs, k8spsmdb-docs, ppg-docs, xtrabackup-docs (docs);
+    percona-community-blog, percona-blog (blog); percona-forums
+    (forum threads, paths like t/12345/1.md).
 
     Args:
         repo: Repository short name, e.g. 'psmysql-docs', 'pxc-docs', 'pmm-doc'.
