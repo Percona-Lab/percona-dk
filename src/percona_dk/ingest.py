@@ -458,9 +458,15 @@ def _upsert_chunks(collection: chromadb.Collection, chunks: list[dict], label: s
 
     for chunk in chunks:
         version_tag = chunk.get("version", "") or ""
-        chunk_id = hashlib.sha256(
-            f"{chunk['source_repo']}:{version_tag}:{chunk['file_path']}:{chunk['text'][:500]}".encode()
-        ).hexdigest()
+        # Only mix the version into the id when it is non-empty, so unversioned
+        # content (community blog/forum, single-branch repos) keeps stable ids
+        # across the multi-version migration. Multi-version repos still get
+        # disambiguated because their chunks always carry a version_tag.
+        if version_tag:
+            id_key = f"{chunk['source_repo']}:{version_tag}:{chunk['file_path']}:{chunk['text'][:500]}"
+        else:
+            id_key = f"{chunk['source_repo']}:{chunk['file_path']}:{chunk['text'][:500]}"
+        chunk_id = hashlib.sha256(id_key.encode()).hexdigest()
         if chunk_id in seen_ids:
             continue
         seen_ids.add(chunk_id)
