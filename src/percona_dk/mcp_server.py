@@ -164,6 +164,34 @@ def _warmup() -> None:
 _repo_versions_cache: dict[str, list[str]] | None = None
 
 
+def _resolve_repo_dirs(repo: str) -> list:
+    """Find local repo dirs matching `repo`, accepting any of these forms:
+
+      - "percona/pxb-docs"     (full slug, as returned in search results)
+      - "pxb-docs"             (short name)
+      - "percona_pxb-docs"     (already-underscored form)
+      - "percona-forums"       (community sources)
+
+    Returns a list of matching Path objects. A multi-version repo will
+    have one entry per version (e.g. percona_pxb-docs__8.0).
+    """
+    slug = repo.replace("/", "_")
+    short = repo.split("/")[-1]
+    out = []
+    for c in REPOS_DIR.iterdir():
+        if not c.is_dir():
+            continue
+        if c.name == slug:
+            out.append(c)
+            continue
+        if c.name.startswith(slug + "__"):
+            out.append(c)
+            continue
+        if short and short != repo and short in c.name:
+            out.append(c)
+    return out
+
+
 def _get_repo_versions() -> dict[str, list[str]]:
     """Return {source_repo: sorted list of distinct versions} excluding empty.
 
@@ -390,8 +418,7 @@ def get_percona_doc(repo: str, path: str, version: str | None = None) -> str:
               tool returns an error listing the available versions so
               you can retry with the right one.
     """
-    base_pat = repo
-    candidates = [c for c in REPOS_DIR.iterdir() if c.is_dir() and base_pat in c.name]
+    candidates = _resolve_repo_dirs(repo)
     if not candidates:
         return f"Error: Repo '{repo}' not found in ingested repos."
 

@@ -241,6 +241,38 @@ def search(req: SearchRequest):
     return SearchResponse(query=req.query, results=items, suggestion=suggestion)
 
 
+def _resolve_repo_dirs(repo: str) -> list:
+    """Find local repo dirs matching `repo`, accepting any of these forms:
+
+      - "percona/pxb-docs"     (full slug, as returned in search results)
+      - "pxb-docs"             (short name)
+      - "percona_pxb-docs"     (already-underscored form)
+      - "percona-forums"       (community sources)
+
+    Returns a list of matching Path objects. A multi-version repo will
+    have one entry per version (e.g. percona_pxb-docs__8.0).
+    """
+    slug = repo.replace("/", "_")
+    short = repo.split("/")[-1]
+    out = []
+    for c in REPOS_DIR.iterdir():
+        if not c.is_dir():
+            continue
+        # Exact match (single-branch repo or community source)
+        if c.name == slug:
+            out.append(c)
+            continue
+        # Multi-version match: slug + "__<version>"
+        if c.name.startswith(slug + "__"):
+            out.append(c)
+            continue
+        # Fallback: short-name substring (handles legacy callers passing
+        # just "pxb-docs")
+        if short and short != repo and short in c.name:
+            out.append(c)
+    return out
+
+
 @app.get("/document/{repo}/{path:path}")
 def get_document(repo: str, path: str, version: str | None = None):
     """Retrieve full Markdown content for a given doc page.
@@ -251,7 +283,7 @@ def get_document(repo: str, path: str, version: str | None = None):
     pdmysql-docs, psmdb-docs, postgresql-docs), `version` is required;
     when omitted, returns 409 with the available versions in the detail.
     """
-    candidates = [c for c in REPOS_DIR.iterdir() if c.is_dir() and repo in c.name]
+    candidates = _resolve_repo_dirs(repo)
     if not candidates:
         raise HTTPException(status_code=404, detail=f"Repo '{repo}' not found in ingested repos")
 
