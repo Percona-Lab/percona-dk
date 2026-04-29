@@ -177,19 +177,18 @@ def _resolve_repo_dirs(repo: str) -> list:
     """
     slug = repo.replace("/", "_")
     short = repo.split("/")[-1]
-    out = []
-    for c in REPOS_DIR.iterdir():
-        if not c.is_dir():
-            continue
-        if c.name == slug:
-            out.append(c)
-            continue
-        if c.name.startswith(slug + "__"):
-            out.append(c)
-            continue
-        if short and short != repo and short in c.name:
-            out.append(c)
-    return out
+    # Pass 1: exact-or-startswith match against the slug form.
+    out = [
+        c for c in REPOS_DIR.iterdir()
+        if c.is_dir() and (c.name == slug or c.name.startswith(slug + "__"))
+    ]
+    if out:
+        return out
+    # Pass 2: substring match against the short name (catches "pxb-docs").
+    return [
+        c for c in REPOS_DIR.iterdir()
+        if c.is_dir() and short and short in c.name
+    ]
 
 
 def _get_repo_versions() -> dict[str, list[str]]:

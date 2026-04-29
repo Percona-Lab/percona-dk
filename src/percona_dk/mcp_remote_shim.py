@@ -243,11 +243,11 @@ def get_percona_doc(repo: str, path: str, version: str | None = None) -> str:
     params = {}
     if version:
         params["version"] = version
-    # URL-encode the repo segment so a full slug like "percona/pxb-docs"
-    # doesn't get split on the literal slash by FastAPI's path router.
-    # `safe=""` ensures the slash itself is encoded as %2F.
-    from urllib.parse import quote
-    repo_segment = quote(repo, safe="")
+    # The REST endpoint uses path-segment routing for {repo}, so a literal
+    # slash (e.g. "percona/pxb-docs") would be parsed as two segments and
+    # break. Send only the last path component; the backend resolver
+    # accepts either form.
+    repo_segment = repo.rsplit("/", 1)[-1]
     try:
         resp = requests.get(
             f"{BACKEND_URL}/document/{repo_segment}/{path}",
