@@ -80,8 +80,41 @@ def _warmup() -> None:
         col = _get_collection()
         col.query(query_texts=["warmup"], n_results=1)
         log.info("Collection warmed (%d chunks)", col.count())
+        _get_repo_versions()
     except Exception:
         log.warning("Warmup failed; will retry on first request", exc_info=True)
+
+
+_repo_versions_cache: dict[str, list[str]] | None = None
+
+
+def _get_repo_versions() -> dict[str, list[str]]:
+    """Return {source_repo: sorted distinct versions} excluding empty values.
+
+    Cached at module level. Built lazily by paginating chroma metadata.
+    """
+    global _repo_versions_cache
+    if _repo_versions_cache is not None:
+        return _repo_versions_cache
+    out: dict[str, set[str]] = {}
+    try:
+        col = _get_collection()
+        offset = 0
+        batch = 5000
+        while True:
+            res = col.get(include=["metadatas"], limit=batch, offset=offset)
+            metas = res.get("metadatas") or []
+            if not metas:
+                break
+            for m in metas:
+                v = (m.get("version") or "").strip()
+                if v:
+                    out.setdefault(m["source_repo"], set()).add(v)
+            offset += batch
+    except Exception:
+        log.warning("Failed to compute repo->versions map", exc_info=True)
+    _repo_versions_cache = {r: sorted(vs) for r, vs in out.items()}
+    return _repo_versions_cache
 
 
 @app.on_event("startup")
@@ -177,11 +210,34 @@ def search(req: SearchRequest):
 
     log.info("Search: %r → %d results", req.query[:80], len(items))
 
+    # If results span multiple versions of any repo and the caller didn't
+    # already pass `version`, attach a hint listing the indexed versions
+    # so the model can re-run scoped to one. Prevents the failure mode
+    # where partial-vs-multi-version retrieval looks like an indexing gap.
+    suggestion_parts: list[str] = []
+    if not req.version:
+        repo_versions = _get_repo_versions()
+        repos_in_results = {it.source_repo for it in items if it.version}
+        hint_lines = [
+            f"  - {r}: {', '.join(repo_versions[r])}"
+            for r in sorted(repos_in_results)
+            if len(repo_versions.get(r, [])) > 1
+        ]
+        if hint_lines:
+            suggestion_parts.append(
+                "Some results above are from repos with multiple indexed "
+                "versions. To scope to one version, re-run with `version=X`. "
+                "Available versions:\n" + "\n".join(hint_lines)
+            )
+
     # Check if the query might match an unconfigured repo
     max_score = max((r.score for r in items), default=0.0)
     from percona_dk.repo_registry import suggest_repos
-    suggestion = suggest_repos(req.query, max_score)
+    repo_suggestion = suggest_repos(req.query, max_score)
+    if repo_suggestion:
+        suggestion_parts.append(repo_suggestion.strip())
 
+    suggestion = "\n\n".join(suggestion_parts) if suggestion_parts else None
     return SearchResponse(query=req.query, results=items, suggestion=suggestion)
 
 

@@ -112,9 +112,22 @@ KNOWN_REPOS: dict[str, list[str]] = {
 
 
 def _get_configured_repos() -> set[str]:
-    """Return the set of repo slugs the user has configured."""
+    """Return the set of repo slugs the user has configured.
+
+    Entries may be plain "owner/repo" or "owner/repo:branch" (multi-version
+    indexing). The branch suffix is stripped so the slug-level membership
+    check works regardless of how many branches of the same repo are
+    indexed.
+    """
     raw = os.getenv("REPOS", "")
-    return {r.strip() for r in raw.split(",") if r.strip()}
+    out: set[str] = set()
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        slug = entry.split(":", 1)[0]
+        out.add(slug)
+    return out
 
 
 def suggest_repos(query: str, max_score: float) -> str | None:
