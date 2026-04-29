@@ -7,6 +7,7 @@ over the ingested Percona documentation corpus.
 
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,10 +54,39 @@ app = FastAPI(
 
 _startup_time = datetime.now(timezone.utc)
 
+# Module-level cache for the chroma client and collection. Without this the
+# DefaultEmbeddingFunction reloads the ~80 MB MiniLM ONNX model and the HNSW
+# index reloads from disk on EVERY request, costing ~1-2s per query.
+# Caching cuts steady-state latency to ~50-100ms. The systemd ingest unit
+# restarts this service on completion, so cache invalidation is automatic.
+_collection: chromadb.Collection | None = None
+_collection_lock = threading.Lock()
+
 
 def _get_collection() -> chromadb.Collection:
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    return client.get_collection(COLLECTION_NAME)
+    global _collection
+    if _collection is not None:
+        return _collection
+    with _collection_lock:
+        if _collection is None:
+            client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+            _collection = client.get_collection(COLLECTION_NAME)
+    return _collection
+
+
+def _warmup() -> None:
+    """Pre-load the collection + embedding model so the first user query is fast."""
+    try:
+        col = _get_collection()
+        col.query(query_texts=["warmup"], n_results=1)
+        log.info("Collection warmed (%d chunks)", col.count())
+    except Exception:
+        log.warning("Warmup failed; will retry on first request", exc_info=True)
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    _warmup()
 
 
 # ---------------------------------------------------------------------------
