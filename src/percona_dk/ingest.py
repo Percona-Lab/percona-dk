@@ -171,6 +171,7 @@ _REPO_URL_MAP: dict[str, tuple[str, str | None]] = {
     "percona/pgsm-docs":            ("pg-stat-monitor", ""),
     "percona/percona-valkey-doc":   ("valkey", ""),
     "openeverest/everest-doc":      ("everest", ""),
+    "percona/proxysql-admin-tool-doc": ("proxysql", ""),
     # No public docs.percona.com pages (yet) — fall back to GitHub source URLs:
     # percona/ps-binlog-server-docs, percona/pmm_dump_docs,
     # percona/pcsm-docs, percona/repo-config-docs
