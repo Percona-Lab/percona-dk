@@ -66,11 +66,21 @@ def _get_collection() -> chromadb.Collection:
 class SearchRequest(BaseModel):
     query: str
     top_k: int = Field(default=5, ge=1, le=50)
+    version: str | None = Field(
+        default=None,
+        description=(
+            "Optional version filter (e.g. '8.0', '8.4', '7.0'). When set, "
+            "only chunks tagged with that version - plus version-agnostic "
+            "content (community blog/forum, single-branch repos) - are "
+            "returned."
+        ),
+    )
 
 
 class SearchResult(BaseModel):
     text: str
     source_repo: str
+    version: str | None = None
     file_path: str
     heading_hierarchy: str
     page_url: str
@@ -98,7 +108,20 @@ def search(req: SearchRequest):
     """Semantic search over Percona documentation. Returns top-k ranked chunks."""
     collection = _get_collection()
 
-    results = collection.query(query_texts=[req.query], n_results=req.top_k)
+    where = None
+    if req.version:
+        # Match the requested version, plus version-agnostic content (empty
+        # version) so single-branch repos and community content still surface.
+        where = {"$or": [
+            {"version": {"$eq": req.version}},
+            {"version": {"$eq": ""}},
+        ]}
+
+    results = collection.query(
+        query_texts=[req.query],
+        n_results=req.top_k,
+        where=where,
+    )
 
     items: list[SearchResult] = []
     if results["documents"] and results["documents"][0]:
@@ -114,6 +137,7 @@ def search(req: SearchRequest):
                 SearchResult(
                     text=doc,
                     source_repo=meta["source_repo"],
+                    version=meta.get("version") or None,
                     file_path=meta["file_path"],
                     heading_hierarchy=meta["heading_hierarchy"],
                     page_url=meta["page_url"],

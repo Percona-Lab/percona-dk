@@ -50,7 +50,26 @@ CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
 FILES_MARKER = DATA_DIR / ".last_ingest_files.json"
 
-DEFAULT_REPOS = [r.strip() for r in os.getenv("REPOS", "percona/psmysql-docs").split(",") if r.strip()]
+def _parse_repos(raw: str) -> list[tuple[str, str | None]]:
+    """Parse a comma-separated REPOS string into (slug, branch) pairs.
+
+    Each entry is either "owner/repo" (clone default branch) or
+    "owner/repo:branch" (clone the named branch). Used to index multiple
+    versions of a doc repo as separate corpora tagged with version metadata.
+    """
+    out: list[tuple[str, str | None]] = []
+    for entry in (e.strip() for e in raw.split(",")):
+        if not entry:
+            continue
+        if ":" in entry:
+            slug, _, branch = entry.partition(":")
+            out.append((slug.strip(), branch.strip() or None))
+        else:
+            out.append((entry, None))
+    return out
+
+
+DEFAULT_REPOS = _parse_repos(os.getenv("REPOS", "percona/psmysql-docs"))
 
 MAX_CHUNK_CHARS = 4000  # rough limit to stay within token budget
 
@@ -69,26 +88,38 @@ def _bar(current: int, total: int, width: int = 35) -> str:
 # Repo cloning / pulling
 # ---------------------------------------------------------------------------
 
-def clone_or_pull(repo_slug: str) -> Path | None:
-    """Clone a GitHub repo (or pull if already cloned). Returns the local path, or None on failure."""
+def clone_or_pull(repo_slug: str, branch: str | None = None) -> Path | None:
+    """Clone a GitHub repo (or pull if already cloned). Returns the local path, or None on failure.
+
+    When `branch` is given, that branch is checked out and the local path is
+    suffixed with `__<branch>` so multiple version-branches of the same repo
+    can coexist on disk.
+    """
     repo_url = f"https://github.com/{repo_slug}.git"
-    local_path = REPOS_DIR / repo_slug.replace("/", "_")
+    base_name = repo_slug.replace("/", "_")
+    local_name = f"{base_name}__{branch}" if branch else base_name
+    local_path = REPOS_DIR / local_name
 
     try:
         if (local_path / ".git").exists():
-            log.info("Pulling latest for %s", repo_slug)
+            log.info("Pulling latest for %s%s", repo_slug, f"@{branch}" if branch else "")
             repo = git.Repo(local_path)
             repo.remotes.origin.pull()
         else:
-            log.info("Cloning %s → %s", repo_url, local_path)
+            log.info("Cloning %s%s → %s", repo_url, f" (branch {branch})" if branch else "", local_path)
             local_path.mkdir(parents=True, exist_ok=True)
-            git.Repo.clone_from(repo_url, local_path, depth=1)
+            kwargs = {"depth": 1}
+            if branch:
+                kwargs["branch"] = branch
+            git.Repo.clone_from(repo_url, local_path, **kwargs)
     except git.GitCommandError as e:
         stderr = str(e).lower()
         if "repository not found" in stderr or "not found" in stderr:
             print(f"\n  ! Repo not found: {repo_slug}")
             print(f"    The repository https://github.com/{repo_slug} does not exist.")
             print(f"    Check the repo name in your .env file and remove or correct it.\n")
+        elif "remote branch" in stderr and "not found" in stderr:
+            print(f"\n  ! Branch '{branch}' not found in {repo_slug}\n")
         else:
             print(f"\n  ! Could not clone {repo_slug}: {e}\n")
         return None
@@ -112,22 +143,80 @@ _RST_LEVEL = {"=": 1, "-": 2, "~": 3}
 DOC_EXTENSIONS = ("*.md", "*.rst")
 
 
-def _build_page_url(repo_slug: str, file_path: str) -> str:
-    """Construct a docs.percona.com URL from repo slug and file path."""
+# Map repo slug -> (docs.percona.com URL slug, default version segment).
+# - URL slug is the path under docs.percona.com (may include sub-paths like
+#   "percona-operator-for-mysql/ps").
+# - Default version segment is what to put in the URL when no explicit branch
+#   was indexed:
+#     None -> use "latest"  (the docs site usually redirects to current LTS)
+#     ""   -> omit the version segment entirely (e.g. /percona-toolkit/page/)
+#     "3"  -> fixed (e.g. PMM, where docs are versioned by major)
+# When an explicit branch IS indexed (multi-version repos), it always wins
+# over the default and is inserted as the version segment.
+_REPO_URL_MAP: dict[str, tuple[str, str | None]] = {
+    "percona/psmysql-docs":         ("percona-server", None),
+    "percona/pxc-docs":             ("percona-xtradb-cluster", None),
+    "percona/pxb-docs":             ("percona-xtrabackup", None),
+    "percona/pdmysql-docs":         ("percona-distribution-for-mysql", None),
+    "percona/psmdb-docs":           ("percona-server-for-mongodb", None),
+    "percona/postgresql-docs":      ("postgresql", None),
+    "percona/pbm-docs":             ("percona-backup-mongodb", ""),
+    "percona/pmm-doc":              ("percona-monitoring-and-management", "3"),
+    "percona/k8sps-docs":           ("percona-operator-for-mysql/ps", ""),
+    "percona/k8spxc-docs":          ("percona-operator-for-mysql/pxc", ""),
+    "percona/k8spsmdb-docs":        ("percona-operator-for-mongodb", ""),
+    "percona/k8spg-docs":           ("percona-operator-for-postgresql", ""),
+    "percona/percona-toolkit":      ("percona-toolkit", ""),
+    "percona/pg_tde":               ("pg-tde", ""),
+    "percona/pgsm-docs":            ("pg-stat-monitor", ""),
+    "percona/percona-valkey-doc":   ("valkey", ""),
+    "openeverest/everest-doc":      ("everest", ""),
+    # No public docs.percona.com pages (yet) — fall back to GitHub source URLs:
+    # percona/ps-binlog-server-docs, percona/pmm_dump_docs,
+    # percona/pcsm-docs, percona/repo-config-docs
+}
+
+
+def _build_page_url(repo_slug: str, file_path: str, version: str | None = None) -> str:
+    """Construct a docs.percona.com URL from repo slug and file path.
+
+    Uses _REPO_URL_MAP for the canonical product slug; falls back to a
+    GitHub source URL for repos that aren't published on docs.percona.com.
+    """
     rel = file_path
     for prefix in ("docs/", "source/"):
         if rel.startswith(prefix):
             rel = rel[len(prefix):]
     rel = re.sub(r"\.(md|rst)$", "", rel)
-    product = repo_slug.split("/")[-1].replace("-docs", "").replace("_", "-")
-    return f"https://docs.percona.com/{product}/latest/{rel}/"
+
+    mapping = _REPO_URL_MAP.get(repo_slug)
+    if mapping is None:
+        # Unmapped repo: link to the GitHub source so users still get a
+        # clickable target. Branch defaults to "main" if unknown.
+        branch_seg = version or "main"
+        return f"https://github.com/{repo_slug}/blob/{branch_seg}/{file_path}"
+
+    url_slug, default_version = mapping
+    if version:
+        version_segment = version
+    elif default_version is None:
+        version_segment = "latest"
+    else:
+        version_segment = default_version  # "" allowed for unversioned URLs
+
+    if version_segment:
+        return f"https://docs.percona.com/{url_slug}/{version_segment}/{rel}/"
+    return f"https://docs.percona.com/{url_slug}/{rel}/"
 
 
-def chunk_markdown(text: str, repo_slug: str, file_path: str) -> list[dict]:
+def chunk_markdown(text: str, repo_slug: str, file_path: str, version: str | None = None) -> list[dict]:
     """Split a Markdown file into chunks at h2/h3 boundaries."""
     headings: list[tuple[int, int, str]] = []
     for m in _HEADING_RE.finditer(text):
         headings.append((m.start(), len(m.group(1)), m.group(2).strip()))
+
+    page_url = _build_page_url(repo_slug, file_path, version)
+    version_tag = version or ""
 
     if not headings:
         stripped = text.strip()
@@ -137,9 +226,10 @@ def chunk_markdown(text: str, repo_slug: str, file_path: str) -> list[dict]:
             {
                 "text": stripped[:MAX_CHUNK_CHARS],
                 "source_repo": repo_slug,
+                "version": version_tag,
                 "file_path": file_path,
                 "heading_hierarchy": [],
-                "page_url": _build_page_url(repo_slug, file_path),
+                "page_url": page_url,
             }
         ]
 
@@ -160,9 +250,10 @@ def chunk_markdown(text: str, repo_slug: str, file_path: str) -> list[dict]:
             {
                 "text": section_text[:MAX_CHUNK_CHARS],
                 "source_repo": repo_slug,
+                "version": version_tag,
                 "file_path": file_path,
                 "heading_hierarchy": list(hierarchy),
-                "page_url": _build_page_url(repo_slug, file_path),
+                "page_url": page_url,
             }
         )
 
@@ -173,16 +264,17 @@ def chunk_markdown(text: str, repo_slug: str, file_path: str) -> list[dict]:
             {
                 "text": pre_heading_text[:MAX_CHUNK_CHARS],
                 "source_repo": repo_slug,
+                "version": version_tag,
                 "file_path": file_path,
                 "heading_hierarchy": [],
-                "page_url": _build_page_url(repo_slug, file_path),
+                "page_url": page_url,
             },
         )
 
     return chunks
 
 
-def chunk_rst(text: str, repo_slug: str, file_path: str) -> list[dict]:
+def chunk_rst(text: str, repo_slug: str, file_path: str, version: str | None = None) -> list[dict]:
     """Split a reStructuredText file into chunks at heading boundaries."""
     headings: list[tuple[int, int, str]] = []
     for m in _RST_HEADING_RE.finditer(text):
@@ -192,7 +284,8 @@ def chunk_rst(text: str, repo_slug: str, file_path: str) -> list[dict]:
         if title:
             headings.append((m.start(), level, title))
 
-    page_url = _build_page_url(repo_slug, file_path)
+    page_url = _build_page_url(repo_slug, file_path, version)
+    version_tag = version or ""
 
     if not headings:
         stripped = text.strip()
@@ -202,6 +295,7 @@ def chunk_rst(text: str, repo_slug: str, file_path: str) -> list[dict]:
             {
                 "text": stripped[:MAX_CHUNK_CHARS],
                 "source_repo": repo_slug,
+                "version": version_tag,
                 "file_path": file_path,
                 "heading_hierarchy": [],
                 "page_url": page_url,
@@ -225,6 +319,7 @@ def chunk_rst(text: str, repo_slug: str, file_path: str) -> list[dict]:
             {
                 "text": section_text[:MAX_CHUNK_CHARS],
                 "source_repo": repo_slug,
+                "version": version_tag,
                 "file_path": file_path,
                 "heading_hierarchy": list(hierarchy),
                 "page_url": page_url,
@@ -238,6 +333,7 @@ def chunk_rst(text: str, repo_slug: str, file_path: str) -> list[dict]:
             {
                 "text": pre_heading_text[:MAX_CHUNK_CHARS],
                 "source_repo": repo_slug,
+                "version": version_tag,
                 "file_path": file_path,
                 "heading_hierarchy": [],
                 "page_url": page_url,
@@ -259,22 +355,22 @@ def _find_doc_files(repo_path: Path) -> list[Path]:
     return sorted(set(files))
 
 
-def collect_chunks(repo_slug: str, repo_path: Path) -> list[dict]:
+def collect_chunks(repo_slug: str, repo_path: Path, version: str | None = None) -> list[dict]:
     """Walk all doc files (.md, .rst) in a repo and return chunks."""
     all_chunks: list[dict] = []
     doc_files = _find_doc_files(repo_path)
-    log.info("Found %d doc files in %s", len(doc_files), repo_slug)
+    log.info("Found %d doc files in %s%s", len(doc_files), repo_slug, f"@{version}" if version else "")
     for doc_file in doc_files:
         rel_path = str(doc_file.relative_to(repo_path))
         if any(part.startswith(".") for part in Path(rel_path).parts):
             continue
         text = doc_file.read_text(encoding="utf-8", errors="replace")
         if doc_file.suffix == ".rst":
-            chunks = chunk_rst(text, repo_slug, rel_path)
+            chunks = chunk_rst(text, repo_slug, rel_path, version)
         else:
-            chunks = chunk_markdown(text, repo_slug, rel_path)
+            chunks = chunk_markdown(text, repo_slug, rel_path, version)
         all_chunks.extend(chunks)
-    log.info("Collected %d chunks from %s", len(all_chunks), repo_slug)
+    log.info("Collected %d chunks from %s%s", len(all_chunks), repo_slug, f"@{version}" if version else "")
     return all_chunks
 
 
@@ -303,14 +399,24 @@ def _get_collection(create: bool = False) -> chromadb.Collection:
     return client.get_collection(name=COLLECTION_NAME)
 
 
-def _delete_chunks_for_files(collection: chromadb.Collection, repo_slug: str, file_paths: list[str]) -> int:
-    """Delete all chunks belonging to specific files. Returns count deleted."""
+def _delete_chunks_for_files(
+    collection: chromadb.Collection,
+    repo_slug: str,
+    file_paths: list[str],
+    version: str | None = None,
+) -> int:
+    """Delete all chunks belonging to specific files (optionally scoped to a version).
+
+    Returns count deleted.
+    """
     total_deleted = 0
+    version_tag = version or ""
     for file_path in file_paths:
         try:
             results = collection.get(
                 where={"$and": [
                     {"source_repo": {"$eq": repo_slug}},
+                    {"version": {"$eq": version_tag}},
                     {"file_path": {"$eq": file_path}},
                 ]}
             )
@@ -318,19 +424,29 @@ def _delete_chunks_for_files(collection: chromadb.Collection, repo_slug: str, fi
                 collection.delete(ids=results["ids"])
                 total_deleted += len(results["ids"])
         except Exception as e:
-            log.warning("Could not delete chunks for %s:%s: %s", repo_slug, file_path, e)
+            log.warning("Could not delete chunks for %s@%s:%s: %s", repo_slug, version_tag, file_path, e)
     return total_deleted
 
 
-def _delete_all_repo_chunks(collection: chromadb.Collection, repo_slug: str) -> int:
-    """Delete all chunks for a repo. Returns count deleted."""
+def _delete_all_repo_chunks(
+    collection: chromadb.Collection,
+    repo_slug: str,
+    version: str | None = None,
+) -> int:
+    """Delete all chunks for a repo (optionally scoped to a version). Returns count deleted."""
+    version_tag = version or ""
     try:
-        results = collection.get(where={"source_repo": {"$eq": repo_slug}})
+        results = collection.get(
+            where={"$and": [
+                {"source_repo": {"$eq": repo_slug}},
+                {"version": {"$eq": version_tag}},
+            ]}
+        )
         if results["ids"]:
             collection.delete(ids=results["ids"])
             return len(results["ids"])
     except Exception as e:
-        log.warning("Could not delete chunks for %s: %s", repo_slug, e)
+        log.warning("Could not delete chunks for %s@%s: %s", repo_slug, version_tag, e)
     return 0
 
 
@@ -340,8 +456,9 @@ def _upsert_chunks(collection: chromadb.Collection, chunks: list[dict], label: s
     ids, documents, metadatas = [], [], []
 
     for chunk in chunks:
+        version_tag = chunk.get("version", "") or ""
         chunk_id = hashlib.sha256(
-            f"{chunk['source_repo']}:{chunk['file_path']}:{chunk['text'][:500]}".encode()
+            f"{chunk['source_repo']}:{version_tag}:{chunk['file_path']}:{chunk['text'][:500]}".encode()
         ).hexdigest()
         if chunk_id in seen_ids:
             continue
@@ -351,6 +468,7 @@ def _upsert_chunks(collection: chromadb.Collection, chunks: list[dict], label: s
         metadatas.append(
             {
                 "source_repo": chunk["source_repo"],
+                "version": version_tag,
                 "file_path": chunk["file_path"],
                 "heading_hierarchy": " > ".join(chunk["heading_hierarchy"]),
                 "page_url": chunk["page_url"],
@@ -389,12 +507,23 @@ def _upsert_chunks(collection: chromadb.Collection, chunks: list[dict], label: s
 # Main ingestion
 # ---------------------------------------------------------------------------
 
-def ingest(repos: list[str] | None = None) -> dict:
-    """Run the ingestion pipeline. Uses incremental updates when possible."""
-    repos = repos or DEFAULT_REPOS
-    total_repos = len(repos)
+def ingest(repos: list[tuple[str, str | None]] | list[str] | None = None) -> dict:
+    """Run the ingestion pipeline. Uses incremental updates when possible.
 
-    # Load stored file hashes from last run
+    `repos` may be a list of (slug, branch) tuples, or legacy list of plain
+    slug strings (treated as default branch). When omitted, DEFAULT_REPOS is
+    used. Each (slug, branch) is treated as a distinct corpus, with chunks
+    tagged with the branch as a `version` metadata field.
+    """
+    if repos is None:
+        repo_specs: list[tuple[str, str | None]] = DEFAULT_REPOS
+    else:
+        repo_specs = [r if isinstance(r, tuple) else (r, None) for r in repos]
+    total_repos = len(repo_specs)
+
+    # Load stored file hashes from last run. Keys are "slug" (single-branch)
+    # or "slug@branch" (multi-version) so different branches have isolated
+    # change-detection state.
     stored_hashes: dict[str, dict[str, str]] = {}
     if FILES_MARKER.exists():
         try:
@@ -414,21 +543,23 @@ def ingest(repos: list[str] | None = None) -> dict:
     total_added = 0
     total_deleted = 0
 
-    for idx, repo_slug in enumerate(repos, 1):
+    for idx, (repo_slug, branch) in enumerate(repo_specs, 1):
+        label = f"{repo_slug}@{branch}" if branch else repo_slug
+        hash_key = f"{repo_slug}@{branch}" if branch else repo_slug
         if _INTERACTIVE:
-            print(f"  [{idx}/{total_repos}] {repo_slug} ...", flush=True)
+            print(f"  [{idx}/{total_repos}] {label} ...", flush=True)
         else:
-            log.info("[%d/%d] Processing %s", idx, total_repos, repo_slug)
+            log.info("[%d/%d] Processing %s", idx, total_repos, label)
 
-        repo_path = clone_or_pull(repo_slug)
+        repo_path = clone_or_pull(repo_slug, branch)
         if repo_path is None:
             if _INTERACTIVE:
-                print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  (skipped - not found)", flush=True)
+                print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  (skipped - not found)", flush=True)
             continue
 
         current_hashes = _scan_file_hashes(repo_slug, repo_path)
-        new_hashes[repo_slug] = current_hashes
-        repo_stored = stored_hashes.get(repo_slug, {})
+        new_hashes[hash_key] = current_hashes
+        repo_stored = stored_hashes.get(hash_key, {})
 
         # Determine what changed
         changed = [p for p, h in current_hashes.items() if repo_stored.get(p) != h]
@@ -437,20 +568,19 @@ def ingest(repos: list[str] | None = None) -> dict:
         if collection_exists and repo_stored:
             if not changed and not deleted:
                 if _INTERACTIVE:
-                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  (no changes)", flush=True)
+                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  (no changes)", flush=True)
                 else:
-                    log.info("No changes in %s", repo_slug)
+                    log.info("No changes in %s", label)
                 continue
 
             # Incremental: delete stale chunks, re-embed changed files
-            n_files = len(changed) + len(deleted)
             if _INTERACTIVE:
-                print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  ({len(changed)} changed, {len(deleted)} deleted)", flush=True)
+                print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  ({len(changed)} changed, {len(deleted)} deleted)", flush=True)
             else:
-                log.info("%s: %d changed, %d deleted files", repo_slug, len(changed), len(deleted))
+                log.info("%s: %d changed, %d deleted files", label, len(changed), len(deleted))
 
             if deleted or changed:
-                n_del = _delete_chunks_for_files(collection, repo_slug, deleted + changed)
+                n_del = _delete_chunks_for_files(collection, repo_slug, deleted + changed, branch)
                 total_deleted += n_del
 
             # Re-chunk and upsert changed files
@@ -459,26 +589,29 @@ def ingest(repos: list[str] | None = None) -> dict:
                 full_path = repo_path / file_path
                 if full_path.exists():
                     text = full_path.read_text(encoding="utf-8", errors="replace")
-                    chunks.extend(chunk_markdown(text, repo_slug, file_path))
+                    if full_path.suffix == ".rst":
+                        chunks.extend(chunk_rst(text, repo_slug, file_path, branch))
+                    else:
+                        chunks.extend(chunk_markdown(text, repo_slug, file_path, branch))
 
             if chunks:
                 if _INTERACTIVE:
-                    print(f"\n  Embedding {len(chunks)} updated chunks ({repo_slug})...", flush=True)
-                n_added = _upsert_chunks(collection, chunks, label=repo_slug)
+                    print(f"\n  Embedding {len(chunks)} updated chunks ({label})...", flush=True)
+                n_added = _upsert_chunks(collection, chunks, label=label)
                 total_added += n_added
 
         else:
-            # First time seeing this repo - full chunk and embed
+            # First time seeing this repo+branch - full chunk and embed
             if _INTERACTIVE:
-                print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  (new - full ingest)...", flush=True)
-            chunks = collect_chunks(repo_slug, repo_path)
+                print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  (new - full ingest)...", flush=True)
+            chunks = collect_chunks(repo_slug, repo_path, branch)
             if _INTERACTIVE:
-                print(f"\n  Embedding {len(chunks)} chunks ({repo_slug})...", flush=True)
+                print(f"\n  Embedding {len(chunks)} chunks ({label})...", flush=True)
             if chunks:
-                n_added = _upsert_chunks(collection, chunks, label=repo_slug)
+                n_added = _upsert_chunks(collection, chunks, label=label)
                 total_added += n_added
                 if _INTERACTIVE:
-                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {repo_slug}  ({len(chunks)} chunks)", flush=True)
+                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  ({len(chunks)} chunks)", flush=True)
 
     # Persist updated file hashes (merge: keep repos not in this run unchanged)
     merged_hashes = {**stored_hashes, **new_hashes}

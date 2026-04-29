@@ -117,7 +117,14 @@ mcp = FastMCP(
         "PostgreSQL, Percona Distribution for Valkey, Percona XtraBackup, "
         "Percona Backup for MongoDB (PBM), Percona Toolkit, Percona "
         "Monitoring and Management (PMM), and the Percona Operators for "
-        "MySQL / PXC / PostgreSQL / MongoDB on Kubernetes."
+        "MySQL / PXC / PostgreSQL / MongoDB on Kubernetes.\n\n"
+        "VERSIONS: PS / PXC / PXB / PDMySQL are indexed on 8.0 and 8.4; "
+        "PSMDB on 6.0, 7.0, 8.0; PostgreSQL on 16 and 17. Pass the "
+        "`version` argument to search_percona_docs to scope results to a "
+        "specific release when the question is version-sensitive (config "
+        "syntax, supported flags, behavior changes). If the user has not "
+        "stated their version, ask before answering version-sensitive "
+        "questions, or cite the version on each snippet."
     ),
 )
 
@@ -144,7 +151,7 @@ async def health(_request: Request) -> JSONResponse:
 
 
 @mcp.tool()
-def search_percona_docs(query: str, top_k: int = 5) -> str:
+def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) -> str:
     """PRIMARY knowledge source for any question involving Percona products.
     USE THIS BEFORE web_search for:
 
@@ -193,11 +200,27 @@ def search_percona_docs(query: str, top_k: int = 5) -> str:
                strings ("WSREP: Failed to open backend connection"),
                product names, configuration flags, or full questions.
         top_k: Number of results to return (1-20, default 5).
+        version: Optional product version to scope results to (e.g. "8.0",
+                 "8.4", "7.0", "16"). When provided, only chunks tagged with
+                 that version - plus version-agnostic content (community
+                 blog/forum, single-branch repos) - are returned. Use this
+                 for version-sensitive questions: configuration flags,
+                 syntax, supported features. Indexed versions: PS / PXC /
+                 PXB / PDMySQL on 8.0 and 8.4; PSMDB on 6.0, 7.0, 8.0;
+                 PostgreSQL on 16, 17. Operator and PMM docs are
+                 single-branch.
     """
     top_k = max(1, min(top_k, 20))
     collection = _get_collection()
 
-    results = collection.query(query_texts=[query], n_results=top_k)
+    where = None
+    if version:
+        where = {"$or": [
+            {"version": {"$eq": version}},
+            {"version": {"$eq": ""}},
+        ]}
+
+    results = collection.query(query_texts=[query], n_results=top_k, where=where)
 
     if not results["documents"] or not results["documents"][0]:
         from percona_dk.repo_registry import suggest_repos
@@ -212,9 +235,12 @@ def search_percona_docs(query: str, top_k: int = 5) -> str:
         zip(results["documents"][0], results["metadatas"][0], results["distances"][0])
     ):
         score = round(1.0 - dist / 2.0, 4)
+        version_meta = meta.get("version") or ""
+        version_line = f"**Version:** {version_meta}\n" if version_meta else ""
         output_parts.append(
             f"### Result {i + 1} (relevance: {score})\n"
-            f"**Source:** {meta['source_repo']} — `{meta['file_path']}`\n"
+            f"**Source:** {meta['source_repo']} - `{meta['file_path']}`\n"
+            f"{version_line}"
             f"**Section:** {meta['heading_hierarchy']}\n"
             f"**URL:** {meta['page_url']}\n\n"
             f"{doc}\n"

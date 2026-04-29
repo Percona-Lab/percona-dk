@@ -98,9 +98,12 @@ def _format_search_results(data: dict) -> str:
 
     parts: list[str] = []
     for i, r in enumerate(results, 1):
+        version_meta = r.get("version") or ""
+        version_line = f"**Version:** {version_meta}\n" if version_meta else ""
         parts.append(
             f"### Result {i} (relevance: {r.get('score', '?')})\n"
             f"**Source:** {r.get('source_repo', '')} - `{r.get('file_path', '')}`\n"
+            f"{version_line}"
             f"**Section:** {r.get('heading_hierarchy', '')}\n"
             f"**URL:** {r.get('page_url', '')}\n\n"
             f"{r.get('text', '')}\n"
@@ -133,7 +136,7 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def search_percona_docs(query: str, top_k: int = 5) -> str:
+def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) -> str:
     """Semantic search across Percona docs, blog, and forum threads.
 
     This tool searches a single combined corpus that includes:
@@ -160,12 +163,21 @@ def search_percona_docs(query: str, top_k: int = 5) -> str:
                strings ("WSREP: Failed to open backend connection"),
                product names, configuration flags, or full questions.
         top_k: Number of results to return (1-20, default 5).
+        version: Optional product version to scope results to (e.g. "8.0",
+                 "8.4", "7.0", "16"). Indexed: PS / PXC / PXB / PDMySQL on
+                 8.0 and 8.4; PSMDB on 6.0, 7.0, 8.0; PostgreSQL on 16 and
+                 17. Operator and PMM docs are single-branch. Pass this
+                 when the question is version-sensitive; ask the user
+                 first if their version is unclear.
     """
     top_k = max(1, min(int(top_k), 20))
+    payload: dict = {"query": query, "top_k": top_k}
+    if version:
+        payload["version"] = version
     try:
         resp = requests.post(
             f"{BACKEND_URL}/search",
-            json={"query": query, "top_k": top_k},
+            json=payload,
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
