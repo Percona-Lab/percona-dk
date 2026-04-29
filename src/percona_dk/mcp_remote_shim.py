@@ -158,17 +158,24 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
     unreachable, the tool returns a VPN-required message instead of
     search results.
 
+    Note: Percona XtraBackup docs are in `pxb-docs`, NOT a repo named
+    `xtrabackup-docs`. Percona Backup for MongoDB docs are in `pbm-docs`.
+    The PostgreSQL distribution is `postgresql-docs`.
+
     Args:
         query: Natural language search query. Can include exact error
                strings ("WSREP: Failed to open backend connection"),
                product names, configuration flags, or full questions.
         top_k: Number of results to return (1-20, default 5).
-        version: Optional product version to scope results to (e.g. "8.0",
-                 "8.4", "7.0", "16"). Indexed: PS / PXC / PXB / PDMySQL on
-                 8.0 and 8.4; PSMDB on 6.0, 7.0, 8.0; PostgreSQL on 16 and
-                 17. Operator and PMM docs are single-branch. Pass this
-                 when the question is version-sensitive; ask the user
-                 first if their version is unclear.
+        version: Optional product version to scope results to. Indexed:
+                 PS / PXC / PXB / PDMySQL on "8.0" and "8.4"; PSMDB on
+                 "6.0", "7.0", "8.0"; PostgreSQL on "16" and "17".
+                 Operator docs (k8s*), PMM, PBM, Toolkit, Valkey,
+                 pg_tde, pgsm, everest, etc. are single-branch and
+                 ignore this arg. NOT indexed: PXB 2.4 / PS 5.7 (EOL),
+                 MongoDB 5.0, PXB 9.x (~0.05% of deployed instances).
+                 Pass this when a query mentions a specific version
+                 (e.g. "PXB 8.0.35 release notes" -> version="8.0").
     """
     top_k = max(1, min(int(top_k), 20))
     payload: dict = {"query": query, "top_k": top_k}
@@ -206,24 +213,40 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
 
 
 @mcp.tool()
-def get_percona_doc(repo: str, path: str) -> str:
+def get_percona_doc(repo: str, path: str, version: str | None = None) -> str:
     """Retrieve the full content of a specific Percona doc, blog post,
     or forum thread.
 
     Use this when you already know which page you want (e.g. from a
     previous search result) and need the complete content.
 
+    Note: Percona XtraBackup docs are in `pxb-docs`, NOT a repo named
+    `xtrabackup-docs`. Percona Backup for MongoDB docs are in `pbm-docs`.
+
     Args:
-        repo: Repository short name, e.g. 'psmysql-docs', 'pxc-docs',
-              'pmm-doc'. For community content, use
-              'percona-community-blog' or 'percona-forums'.
-        path: File path within the repo, e.g.
-              'docs/innodb-show-status.md', 'posts/{slug}.md', or
-              't/{topic_id}/{post_number}.md' for a specific forum post.
+        repo: Repository short name. Multi-version repos (require
+              `version`): psmysql-docs, pxc-docs, pxb-docs,
+              pdmysql-docs, psmdb-docs, postgresql-docs. Single-branch:
+              pmm-doc, pbm-docs, k8sps-docs, k8spxc-docs, k8spsmdb-docs,
+              k8spg-docs, percona-toolkit, pg_tde, pgsm-docs, pcsm-docs,
+              percona-valkey-doc, ps-binlog-server-docs,
+              proxysql-admin-tool-doc, pmm_dump_docs, repo-config-docs,
+              everest-doc. Community: percona-community-blog,
+              percona-forums.
+        path: File path within the repo, e.g. 'docs/installation.md',
+              'posts/{slug}.md', or 't/{topic_id}/{post_number}.md'.
+        version: Required for multi-version repos (e.g. "8.0", "8.4",
+              "7.0", "16"). Omit for single-branch repos. If you call a
+              multi-version repo without this, the response lists the
+              available versions so you can retry.
     """
+    params = {}
+    if version:
+        params["version"] = version
     try:
         resp = requests.get(
             f"{BACKEND_URL}/document/{repo}/{path}",
+            params=params,
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()

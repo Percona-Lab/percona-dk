@@ -186,20 +186,39 @@ def search(req: SearchRequest):
 
 
 @app.get("/document/{repo}/{path:path}")
-def get_document(repo: str, path: str):
+def get_document(repo: str, path: str, version: str | None = None):
     """Retrieve full Markdown content for a given doc page.
 
-    Example: GET /document/psmysql-docs/docs/innodb-show-status.md
-    """
-    # Map short repo name to the cloned directory
-    repo_dir = None
-    for candidate in REPOS_DIR.iterdir():
-        if candidate.is_dir() and repo in candidate.name:
-            repo_dir = candidate
-            break
+    Example: GET /document/psmysql-docs/docs/innodb-show-status.md?version=8.0
 
-    if repo_dir is None:
+    For multi-version repos (psmysql-docs, pxc-docs, pxb-docs,
+    pdmysql-docs, psmdb-docs, postgresql-docs), `version` is required;
+    when omitted, returns 409 with the available versions in the detail.
+    """
+    candidates = [c for c in REPOS_DIR.iterdir() if c.is_dir() and repo in c.name]
+    if not candidates:
         raise HTTPException(status_code=404, detail=f"Repo '{repo}' not found in ingested repos")
+
+    if version:
+        suffix = f"__{version}"
+        target = next((c for c in candidates if c.name.endswith(suffix)), None)
+        if target is None:
+            available = sorted({c.name.split("__")[-1] for c in candidates if "__" in c.name}) or ["(single-branch)"]
+            raise HTTPException(
+                status_code=404,
+                detail=f"Repo '{repo}' has no local copy at version '{version}'. Available: {', '.join(available)}",
+            )
+        repo_dir = target
+    else:
+        single_branch = [c for c in candidates if "__" not in c.name]
+        if single_branch:
+            repo_dir = single_branch[0]
+        else:
+            available = sorted({c.name.split("__")[-1] for c in candidates})
+            raise HTTPException(
+                status_code=409,
+                detail=f"Repo '{repo}' has multiple indexed versions: {', '.join(available)}. Specify ?version=X.",
+            )
 
     file_path = repo_dir / path
     if not file_path.exists() or not file_path.is_file():
@@ -214,6 +233,7 @@ def get_document(repo: str, path: str):
     content = file_path.read_text(encoding="utf-8", errors="replace")
     return {
         "repo": repo,
+        "version": version,
         "path": path,
         "content": content,
     }

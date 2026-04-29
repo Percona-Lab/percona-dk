@@ -155,8 +155,42 @@ def _warmup() -> None:
         col = _get_collection()
         col.query(query_texts=["warmup"], n_results=1)
         log.info("Collection warmed (%d chunks)", col.count())
+        # Also pre-build the repo->versions map so version hints are free.
+        _get_repo_versions()
     except Exception:
         log.warning("Warmup failed; will retry on first request", exc_info=True)
+
+
+_repo_versions_cache: dict[str, list[str]] | None = None
+
+
+def _get_repo_versions() -> dict[str, list[str]]:
+    """Return {source_repo: sorted list of distinct versions} excluding empty.
+
+    Cached at module level. Built lazily by paginating through chroma metadata.
+    """
+    global _repo_versions_cache
+    if _repo_versions_cache is not None:
+        return _repo_versions_cache
+    out: dict[str, set[str]] = {}
+    try:
+        col = _get_collection()
+        offset = 0
+        batch = 5000
+        while True:
+            res = col.get(include=["metadatas"], limit=batch, offset=offset)
+            metas = res.get("metadatas") or []
+            if not metas:
+                break
+            for m in metas:
+                v = (m.get("version") or "").strip()
+                if v:
+                    out.setdefault(m["source_repo"], set()).add(v)
+            offset += batch
+    except Exception:
+        log.warning("Failed to compute repo->versions map", exc_info=True)
+    _repo_versions_cache = {r: sorted(vs) for r, vs in out.items()}
+    return _repo_versions_cache
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -192,10 +226,15 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
     - Operator tuning (reconciliation workers, concurrency, leader election)
     - Forum-discussed troubleshooting and known issues
 
-    Indexes: official Percona docs (psmysql-docs, pxc-docs, pmm-doc,
-    pbm-doc, k8sps-docs, k8spxc-docs, k8spsmdb-docs, ppg-docs,
-    xtrabackup-docs), Percona Blog, Percona Community Blog, and Percona
-    Forums.
+    Indexes the official Percona doc repos (psmysql-docs, pxc-docs,
+    pxb-docs, pdmysql-docs, psmdb-docs, postgresql-docs, pbm-docs,
+    pmm-doc, k8sps-docs, k8spxc-docs, k8spsmdb-docs, k8spg-docs,
+    pg_tde, pgsm-docs, pcsm-docs, percona-toolkit, percona-valkey-doc,
+    proxysql-admin-tool-doc, ps-binlog-server-docs, pmm_dump_docs,
+    repo-config-docs, everest-doc), plus Percona Community Blog and
+    Percona Forums. Note: Percona XtraBackup ships from `pxb-docs`,
+    NOT a repo named "xtrabackup-docs". Percona Backup for MongoDB is
+    `pbm-docs`. The PostgreSQL distribution is `postgresql-docs`.
 
     This is faster, more authoritative, and better-scoped than web_search
     for Percona content. The corpus is re-ingested daily, so it includes
@@ -225,15 +264,24 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
                strings ("WSREP: Failed to open backend connection"),
                product names, configuration flags, or full questions.
         top_k: Number of results to return (1-20, default 5).
-        version: Optional product version to scope results to (e.g. "8.0",
-                 "8.4", "7.0", "16"). When provided, only chunks tagged with
-                 that version - plus version-agnostic content (community
-                 blog/forum, single-branch repos) - are returned. Use this
-                 for version-sensitive questions: configuration flags,
-                 syntax, supported features. Indexed versions: PS / PXC /
-                 PXB / PDMySQL on 8.0 and 8.4; PSMDB on 6.0, 7.0, 8.0;
-                 PostgreSQL on 16, 17. Operator and PMM docs are
-                 single-branch.
+        version: Optional product version to scope results to. Indexed
+                 versions:
+                   - PS / PXC / PXB / PDMySQL: "8.0", "8.4"
+                   - PSMDB: "6.0", "7.0", "8.0"
+                   - PostgreSQL distribution: "16", "17"
+                 Operator docs (k8sps/k8spxc/k8spsmdb/k8spg), PMM, PBM,
+                 Toolkit, Valkey, pg_tde, pgsm, everest, etc. are
+                 single-branch and ignore the version arg.
+
+                 NOT indexed: PXB 2.4 (EOL), PS 5.7 (EOL), MongoDB 5.0,
+                 PXB 9.x (~0.05% of deployed instances per telemetry).
+
+                 When provided, only chunks tagged with that version -
+                 plus version-agnostic content (community blog/forum,
+                 single-branch repos) - are returned. If a query
+                 mentions a specific version (e.g. "PXB 8.0.35 release
+                 notes"), pass version="8.0" so retrieval is scoped to
+                 the right release branch.
     """
     top_k = max(1, min(top_k, 20))
     collection = _get_collection()
@@ -275,6 +323,31 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
 
     output = "\n---\n".join(output_parts)
 
+    # If any returned chunk is from a multi-version repo, hint that the
+    # caller can scope to a specific version. Helps the model avoid
+    # assuming a repo is "only partially indexed" when it's actually
+    # split across version-tagged subsets.
+    if not version:
+        repo_versions = _get_repo_versions()
+        repos_in_results = {
+            meta["source_repo"]
+            for meta in results["metadatas"][0]
+            if meta.get("version")
+        }
+        hint_lines = [
+            f"  - {r}: {', '.join(repo_versions[r])}"
+            for r in sorted(repos_in_results)
+            if len(repo_versions.get(r, [])) > 1
+        ]
+        if hint_lines:
+            output += (
+                "\n\n---\n"
+                "Some results above are from repos with multiple indexed "
+                "versions. To scope to one version, re-run with the "
+                "`version` argument. Available versions:\n"
+                + "\n".join(hint_lines)
+            )
+
     # Check if the query might match an unconfigured repo
     max_score = max(
         (round(1.0 - d / 2.0, 4) for d in results["distances"][0]),
@@ -289,35 +362,63 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
 
 
 @mcp.tool()
-def get_percona_doc(repo: str, path: str) -> str:
+def get_percona_doc(repo: str, path: str, version: str | None = None) -> str:
     """Retrieve full Markdown content of a known Percona page. Standard
     workflow: search_percona_docs first, then call this with the path +
-    repo from a search result.
+    repo (and version, if it's a multi-version repo) from a search result.
 
-    Repos: psmysql-docs, pxc-docs, pmm-doc, pbm-doc, k8sps-docs,
-    k8spxc-docs, k8spsmdb-docs, ppg-docs, xtrabackup-docs (docs);
-    percona-community-blog, percona-blog (blog); percona-forums
-    (forum threads, paths like t/12345/1.md).
+    Repos:
+      - Multi-version (require `version`): psmysql-docs, pxc-docs,
+        pxb-docs, pdmysql-docs, psmdb-docs, postgresql-docs.
+      - Single-branch (ignore `version`): pmm-doc, pbm-docs, k8sps-docs,
+        k8spxc-docs, k8spsmdb-docs, k8spg-docs, percona-toolkit, pg_tde,
+        pgsm-docs, pcsm-docs, percona-valkey-doc, ps-binlog-server-docs,
+        proxysql-admin-tool-doc, pmm_dump_docs, repo-config-docs,
+        everest-doc.
+      - Community: percona-community-blog (blog), percona-forums (paths
+        like 't/12345/1.md').
+
+    Note: Percona XtraBackup docs are in `pxb-docs`, NOT a repo named
+    `xtrabackup-docs`. Percona Backup for MongoDB docs are in `pbm-docs`.
 
     Args:
-        repo: Repository short name, e.g. 'psmysql-docs', 'pxc-docs', 'pmm-doc'.
-              For community content, use 'percona-community-blog' or 'percona-forums'.
+        repo: Repository short name (see lists above).
         path: File path within the repo, e.g. 'docs/innodb-show-status.md',
-              'posts/2026-04-17-incremental-backups-in-percona-kubernetes-operator-for-mysql.md',
-              or 't/40009/1.md' for a specific forum post.
+              'posts/{slug}.md', or 't/{topic_id}/{post_number}.md'.
+        version: Required for multi-version repos (e.g. "8.0", "8.4",
+              "7.0", "16"). When omitted on a multi-version repo, the
+              tool returns an error listing the available versions so
+              you can retry with the right one.
     """
-    repo_dir = None
-    for candidate in REPOS_DIR.iterdir():
-        if candidate.is_dir() and repo in candidate.name:
-            repo_dir = candidate
-            break
-
-    if repo_dir is None:
+    base_pat = repo
+    candidates = [c for c in REPOS_DIR.iterdir() if c.is_dir() and base_pat in c.name]
+    if not candidates:
         return f"Error: Repo '{repo}' not found in ingested repos."
+
+    if version:
+        suffix = f"__{version}"
+        target = next((c for c in candidates if c.name.endswith(suffix)), None)
+        if target is None:
+            available = sorted({c.name.split("__")[-1] for c in candidates if "__" in c.name}) or ["(single-branch)"]
+            return (
+                f"Error: Repo '{repo}' has no local copy at version '{version}'. "
+                f"Available: {', '.join(available)}."
+            )
+        repo_dir = target
+    else:
+        single_branch = [c for c in candidates if "__" not in c.name]
+        if single_branch:
+            repo_dir = single_branch[0]
+        else:
+            available = sorted({c.name.split("__")[-1] for c in candidates})
+            return (
+                f"Error: Repo '{repo}' has multiple indexed versions: "
+                f"{', '.join(available)}. Pass `version=X` to specify which."
+            )
 
     file_path = repo_dir / path
     if not file_path.exists() or not file_path.is_file():
-        return f"Error: Document '{path}' not found in repo '{repo}'."
+        return f"Error: Document '{path}' not found in repo '{repo}'" + (f"@{version}." if version else ".")
 
     try:
         file_path.resolve().relative_to(repo_dir.resolve())
