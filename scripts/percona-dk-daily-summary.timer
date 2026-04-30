@@ -1,0 +1,10 @@
+[Unit]
+Description=Run percona-dk daily usage summary email at 00:10 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:10:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

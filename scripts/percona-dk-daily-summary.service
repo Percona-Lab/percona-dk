@@ -1,0 +1,8 @@
+[Unit]
+Description=Email a daily usage summary for percona-dk
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dennis.kittrell/percona-dk
+Environment=SUMMARY_EMAIL=dennis.kittrell@percona.com
+ExecStart=/home/dennis.kittrell/percona-dk/scripts/daily-usage-summary.sh
