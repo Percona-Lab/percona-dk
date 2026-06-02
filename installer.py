@@ -734,6 +734,47 @@ def configure_ai_clients(install_dir: Path, mode: str = "shim") -> bool:
     return any_configured
 
 # ---------------------------------------------------------------------------
+# Step 11b: Companion skills (optional, separate project)
+# ---------------------------------------------------------------------------
+
+def offer_skills_install() -> None:
+    """Opt-in: also install the companion Percona skills.
+
+    The skills (percona-dk-mcp, mysql-to-percona, xtrabackup-recipes,
+    percona-toolkit-recipes) brief the agent on what to recommend and to call
+    percona-dk for version-correct specifics before writing them into code.
+    They live in the separate Percona-Lab/skills repo (MIT) and install via the
+    `skills` CLI. percona-dk works fine without them; this step is purely
+    additive and never blocks the install.
+    """
+    print(c(BOLD, "Companion skills (optional)"))
+    print(f"  {DIM}Short briefings that pair with percona-dk: they tell your agent{NC}")
+    print(f"  {DIM}what to recommend for Percona products and to look up current,{NC}")
+    print(f"  {DIM}version-correct specifics here before emitting them into code.{NC}")
+    print(f"  {DIM}From github.com/Percona-Lab/skills (MIT, separate project).{NC}")
+
+    if not ask_yn("Install the companion Percona skills now?", default=True):
+        print(f"    {DIM}Add later with: npx skills add Percona-Lab/skills{NC}")
+        print()
+        return
+
+    npx = shutil.which("npx")
+    if npx:
+        try:
+            run([npx, "-y", "skills", "add", "Percona-Lab/skills"], check=True)
+            info("Companion skills installed.")
+            print()
+            return
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            warn("`npx skills` did not complete - here's how to add them manually.")
+    else:
+        warn("Node.js / npx not found - here's how to add the skills manually.")
+
+    print(f"    {DIM}npx skills add Percona-Lab/skills{NC}")
+    print(f"    {DIM}(or copy each SKILL.md into ~/.claude/skills/<name>/ - see the skills README){NC}")
+    print()
+
+# ---------------------------------------------------------------------------
 # Step 12: Ingestion
 # ---------------------------------------------------------------------------
 
@@ -932,6 +973,7 @@ def main() -> None:
         # no refresh schedule. Just write the .env, configure AI clients, done.
         write_env(install_dir, mode=mode, selected_repos=existing_repos, refresh_days=existing_refresh)
         any_configured = configure_ai_clients(install_dir, mode=mode)
+        offer_skills_install()
         send_install_analytics(install_dir, selected_repos=[], mode=mode)
         print_done(any_configured, mode=mode)
         return
@@ -946,6 +988,7 @@ def main() -> None:
 
     write_env(install_dir, mode=mode, selected_repos=selected_repos, refresh_days=refresh_days)
     any_configured = configure_ai_clients(install_dir, mode=mode)
+    offer_skills_install()
     run_ingestion(install_dir, selected_repos, existing_repos, md_counts)
     send_install_analytics(install_dir, selected_repos=selected_repos, mode=mode)
     print_done(any_configured, mode=mode)
