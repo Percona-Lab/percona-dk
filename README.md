@@ -34,6 +34,31 @@ Three things push an agent toward that failure mode, and percona-dk addresses ea
 
 **Verify in 60 seconds:** ask any of these with **web search off** — the real condition inside most coding agents — first with the connector off, then on. Watch for the removed flag, the wrong-branch config key, or the Percona-specific tool the agent never reaches for.
 
+## Who it's for
+
+percona-dk pays off in proportion to two things: **how little web access the agent has, and how directly its output hits real infrastructure.** Sorted by how strong the win is:
+
+| Persona | When it bites | Without percona-dk | With it | Honest condition |
+|---|---|---|---|---|
+| **Platform / DevOps engineer** generating Terraform, Ansible, Helm, or operator CRs with a coding agent | "Write the `PerconaServerMongoDB` CR with scheduled backups + PITR"; "generate the `my.cnf` for PS 8.4" | A renamed CR field, a removed flag, or `innodb_log_file_size` on 8.4 — applies cleanly, fails later | The agent looks the field up `version`-scoped mid-generation; the artifact cites real, current values | **strongest** — IDE/CI agents rarely have web, and the output is executable |
+| **SRE / on-call** running a headless or autonomous ops agent | A remediation runbook drafted with no human reviewing each line | A confidently-wrong recovery step (wrong SST method, deprecated bootstrap flag) | The freshest version-correct procedure, cited — the agent has no other source | no web, no human, highest cost of wrong |
+| **App developer (not a DBA)** using Cursor/Copilot to stand up Percona | "Back up this 300 GB Percona MySQL"; "migrate our Atlas Mongo to self-hosted" | Reaches for `mysqldump` / `mongosync`, misses XtraBackup / Percona ClusterSync | Surfaces the Percona-native tool the dev didn't know to ask for | depends whether their agent has web |
+| **Smaller / local models** (Llama, Qwen via Ollama; air-gapped) | Any Percona question | More stale defaults and version blur than a frontier model | Connector + skill correct what the model can't | the gap is widest here |
+| **Agent builders / ISVs** embedding percona-dk in their own product | They need Percona knowledge as a dependency, not a thing to build | Hand-maintain a fact base, or accept hallucinations | One endpoint = a maintained, daily-fresh Percona knowledge layer | they ship to their own no-web agents |
+
+The honest non-target: **a person in a chat with web search asking "how do I configure X."** A strong model gets there on its own; percona-dk ties it (cited, less drift) rather than beating it. Build for the agents that *can't go look* — that's where it's real.
+
+## Skills, the knowledge MCP, and why percona-dk has both
+
+Two layers, different jobs:
+
+- **A skill** is a static briefing the agent loads into context — *what to recommend and what to avoid* ("use XtraBackup, not `mysqldump`"; "Percona Server is not PXC"). Zero infrastructure, always present. But it's a snapshot a human wrote: it **goes stale**, it can't carry a 16,000-thread forum, and it can't hand a no-web agent a fact that postdates the model.
+- **The knowledge MCP** (this project) is live retrieval of the *actual current text* — version-tagged, re-ingested daily, docs + blog + forum. It's the only layer that can give an offline agent a release that shipped after its training cutoff.
+
+You want both: the skill tells the agent *what to say first and when to look something up*; percona-dk tells it *what's actually true on this version, right now*. The companion [Percona skills](https://github.com/Percona-Lab/skills) pair with this server for exactly that.
+
+This split is a deliberate design choice, not an accident. The agent-skills convention percona-dk's skills follow was established by [MariaDB/skills](https://github.com/MariaDB/skills) and [villagesql/villagesql-skills](https://github.com/villagesql/villagesql-skills) — both ship static briefings, and MariaDB additionally offers an MCP for *querying your live database* (schemas, read-only SQL). percona-dk adds the piece neither does: a **documentation/knowledge MCP** — live, version-scoped retrieval of the official Percona corpus. The trade-off is honest — if your agents mostly have web access, static skills plus doc links go a long way; the knowledge MCP earns its keep specifically for the no-web, version-sensitive, executable-output loop described above.
+
 ## Supported tools
 
 percona-dk works with any AI tool that supports MCP or HTTP APIs:
