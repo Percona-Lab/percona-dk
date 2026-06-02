@@ -2,37 +2,38 @@
 
 > **Status:** Fully functional. 22 doc repos across 7 stacks, plus the Percona Community blog and the Percona forums. MCP + REST API working. Supports Markdown and reStructuredText. With community interest, this could grow into an official Percona developer resource.
 
-**percona-dk is a ground-truth Percona lookup for AI coding agents.** When an agent — Claude Code, Cursor, Copilot, Codex, or any MCP/HTTP client — writes the install scripts, Ansible playbooks, Terraform, Kubernetes operator CRs, `my.cnf`/`mongod.conf`, Dockerfiles, or runbooks that stand up and operate Percona software, it calls percona-dk to ground each Percona-specific fact in current, version-correct, cited documentation instead of training-data memory.
+**percona-dk is a ground-truth Percona lookup for AI coding agents.** When an agent - Claude Code, Cursor, Copilot, Codex, or any MCP/HTTP client - writes the install scripts, Ansible playbooks, Terraform, Kubernetes operator CRs, `my.cnf`/`mongod.conf`, Dockerfiles, or runbooks that stand up and operate Percona software, it calls percona-dk to ground each Percona-specific fact in current, version-correct, cited documentation instead of training-data memory.
 
-It ingests three kinds of Percona knowledge — official docs from 22 GitHub repos, ~280 [percona.community](https://percona.community/blog/) blog posts, and ~16,000 [forums.percona.com](https://forums.percona.com) threads — chunks and embeds them locally, and serves them over [MCP](https://modelcontextprotocol.io/) and a REST API. Everything runs on your machine: no API keys, no scraping.
+It ingests three kinds of Percona knowledge - official docs from 22 GitHub repos, ~280 [percona.community](https://percona.community/blog/) blog posts, and ~16,000 [forums.percona.com](https://forums.percona.com) threads - chunks and embeds them locally, and serves them over [MCP](https://modelcontextprotocol.io/) and a REST API. Everything runs on your machine: no API keys, no scraping.
 
 ## Why an agent needs this
 
-AI coding agents increasingly write the code that deploys and operates databases. That output is **executable and it ships to real infrastructure** — so the failure mode that matters isn't "the agent sounds unsure," it's **confident, plausible, and wrong**: a package name from the wrong repo, a flag removed two releases ago, a config key that's valid on 8.0 but gone on 8.4, an operator CR field that was renamed. It looks right. It runs. Then a node won't rejoin the cluster, or a backup turns out to be silently unrestorable.
+AI coding agents increasingly write the code that deploys and operates databases. That output is **executable and it ships to real infrastructure** - so the failure mode that matters isn't "the agent sounds unsure," it's **confident, plausible, and wrong**: a package name from the wrong repo, a flag removed two releases ago, a config key that's valid on 8.0 but gone on 8.4, an operator CR field that was renamed. It looks right. It runs. Then a node won't rejoin the cluster, or a backup turns out to be silently unrestorable.
 
 Three things push an agent toward that failure mode, and percona-dk addresses each:
 
-- **No web in the loop.** Most code generation happens with no web search — in an IDE, in CI, in a headless pipeline. The agent generates from training data, which has a cutoff and no Percona-specific grounding. percona-dk is a single tool call that returns the current answer, cited. **This is the case it's built for.**
-- **Training data blurs versions and leans upstream.** Models absorb far more upstream MySQL/MongoDB/PostgreSQL than Percona's specific deltas, and they blur 8.0 vs 8.4 syntax. Pass `version="8.4"` and every chunk — plus the resolved `docs.percona.com/...8.4/...` URL — is scoped to the branch the agent is generating for.
+- **No web in the loop.** Most code generation happens with no web search - in an IDE, in CI, in a headless pipeline. The agent generates from training data, which has a cutoff and no Percona-specific grounding. percona-dk is a single tool call that returns the current answer, cited. **This is the case it's built for.**
+- **Training data blurs versions and leans upstream.** Models absorb far more upstream MySQL/MongoDB/PostgreSQL than Percona's specific deltas, and they blur 8.0 vs 8.4 syntax. Pass `version="8.4"` and every chunk - plus the resolved `docs.percona.com/...8.4/...` URL - is scoped to the branch the agent is generating for.
 - **The freshest facts postdate the model.** The corpus is re-ingested daily, so post-cutoff releases (e.g. Percona ClusterSync for MongoDB 0.8.1, the PXC Clone-plugin SST method) are present. A model with no web cannot know these at all.
 
-**The honest boundary:** this is not pitched against a human in a browser. A person using a strong model *with* web search can usually reach the same public docs — for "how do I configure X," percona-dk ties that experience (cited inline, less drift) rather than beating it. The win is the *agent* loop: no web, executable output, version-sensitive, high cost of confidently wrong. It is largest for agents with no web access and for smaller tool-calling models that carry more stale defaults.
+**The honest boundary:** this is not pitched against a human in a browser. A person using a strong model *with* web search can usually reach the same public docs - for "how do I configure X," percona-dk ties that experience (cited inline, less drift) rather than beating it. The win is the *agent* loop: no web, executable output, version-sensitive, high cost of confidently wrong. It is largest for agents with no web access and for smaller tool-calling models that carry more stale defaults.
 
-### What an agent gets wrong without it — each verified against the live corpus
+### What an agent gets wrong without it
 
-🔵 *this model, no web, is actually wrong; percona-dk corrects it* · 🟡 *the corpus is the authoritative cite; a web chat ties*
+Two kinds of failure, each verified against the live corpus:
 
-1. **🔵 A valid method the agent denies exists.** Asked whether PXC supports the Clone plugin as an SST method, this model with no web answers *"No, PXC does not."* Wrong: the [Clone SST method](https://docs.percona.com/percona-xtradb-cluster/8.4/clone-sst/) ships in PXC 8.4.4-4 ([PXC-4469](https://perconadev.atlassian.net/browse/PXC-4469), 2025-04-16) and is a tech-preview in 8.0 (`clone` has been in the default `wsrep_sst_allowed_methods` since 8.0.41). An agent scripting SST would omit a faster, supported option.
+- **🔵** the model, with no web, is actually *wrong*; percona-dk corrects it.
+- **🟡** percona-dk is the authoritative, version-correct cite; a web-enabled chat could also get there.
 
-2. **🔵 A Percona tool the agent overlooks.** Asked how to migrate MongoDB Atlas to self-hosted PSMDB, this model with no web recommends MongoDB's `mongosync` and states Percona has no dedicated tool. It does: [Percona ClusterSync for MongoDB (PCSM)](https://docs.percona.com/pcsm/latest/) — formerly Percona Link for MongoDB, current 0.8.1 — does change-stream replication for minimal-downtime migration. (Per the [forum guideline](https://forums.percona.com/t/guideline-for-migrating-from-atlas-cluster-to-percona-mongodb/36958), truly *zero*-downtime Atlas exits are constrained because Atlas doesn't expose backend nodes — plan for minimal, not zero.)
+| | The agent's answer with no web | What's actually true (verified in the corpus) |
+|---|---|---|
+| 🔵 | "PXC has no Clone-plugin SST method." | It does. [Clone SST](https://docs.percona.com/percona-xtradb-cluster/8.4/clone-sst/) shipped in PXC 8.4.4-4 ([PXC-4469](https://perconadev.atlassian.net/browse/PXC-4469), 2025-04-16), and is a tech-preview in 8.0 where `clone` has been in the default `wsrep_sst_allowed_methods` since 8.0.41. |
+| 🔵 | "Use MongoDB's `mongosync`; Percona has no dedicated migration tool." | It does. [Percona ClusterSync for MongoDB](https://docs.percona.com/pcsm/latest/) (PCSM, formerly Percona Link, v0.8.1) does change-stream replication for minimal-downtime Atlas-to-PSMDB migration. Truly *zero* downtime is limited because Atlas hides its backend nodes, so plan for minimal. |
+| 🟡 | Emits long-removed flags: `innobackupex`, `--compress=quicklz`, `innodb_track_changed_pages`. | Removed in XtraBackup 8.0, in 8.0.34-29 (ZSTD is now the default), and in PS 8.0.30. Use the `xtrabackup` binary, ZSTD, and `--page-tracking`. A strong model often knows this; a weaker one does not. |
+| 🟡 | Writes `innodb_log_file_size` into a PS 8.4 `my.cnf`. | Removed in 8.4, where `innodb_redo_log_capacity` is the only knob. `search_percona_docs(query, version="8.4")` returns only 8.4-tagged chunks, so the generated config matches the target. |
+| 🟡 | Guesses at operator Custom Resource field names. | The corpus carries each operator's [CR options reference](https://docs.percona.com/k8spsmdb/latest/operator/), so a `PerconaServerMongoDB` (or PXC/PG) manifest cites real fields. |
 
-3. **🟡 Removed flags that still look current.** Training data is full of `innobackupex` (removed in XtraBackup 8.0 — use the `xtrabackup` binary), `--compress=quicklz` (removed for backup in 8.0.34-29 — the default is now ZSTD), and `innodb_track_changed_pages` (deprecated PS 8.0.27, **removed 8.0.30** — use `--page-tracking`). A strong model often knows these; a weaker one writes them into a script verbatim. The corpus is the authoritative check either way.
-
-4. **🟡 Version-correct config in generated files.** Generating a `my.cnf` for PS 8.4, a model may reach for `innodb_log_file_size` — removed in 8.4, where `innodb_redo_log_capacity` is the only knob. `search_percona_docs(query, version="8.4")` returns only 8.4-tagged chunks, so the emitted config matches the target branch.
-
-5. **🟡 Operator CR field reference.** Operator Custom Resource fields shift between releases; the corpus carries each operator's [CR options reference](https://docs.percona.com/k8spsmdb/latest/operator/) so an agent writing a `PerconaServerMongoDB` (or PXC/PG) manifest cites real fields instead of guessing.
-
-**Verify in 60 seconds:** ask any of these with **web search off** — the real condition inside most coding agents — first with the connector off, then on. Watch for the removed flag, the wrong-branch config key, or the Percona-specific tool the agent never reaches for.
+**Verify in 60 seconds:** ask any of these with **web search off** (the real condition inside most coding agents), first with the connector off, then on. Watch for the removed flag, the wrong-branch config key, or the Percona-specific tool the agent never reaches for.
 
 ## Who it's for
 
@@ -40,24 +41,24 @@ percona-dk pays off in proportion to two things: **how little web access the age
 
 | Persona | When it bites | Without percona-dk | With it | Honest condition |
 |---|---|---|---|---|
-| **Platform / DevOps engineer** generating Terraform, Ansible, Helm, or operator CRs with a coding agent | "Write the `PerconaServerMongoDB` CR with scheduled backups + PITR"; "generate the `my.cnf` for PS 8.4" | A renamed CR field, a removed flag, or `innodb_log_file_size` on 8.4 — applies cleanly, fails later | The agent looks the field up `version`-scoped mid-generation; the artifact cites real, current values | **strongest** — IDE/CI agents rarely have web, and the output is executable |
-| **SRE / on-call** running a headless or autonomous ops agent | A remediation runbook drafted with no human reviewing each line | A confidently-wrong recovery step (wrong SST method, deprecated bootstrap flag) | The freshest version-correct procedure, cited — the agent has no other source | no web, no human, highest cost of wrong |
+| **Platform / DevOps engineer** generating Terraform, Ansible, Helm, or operator CRs with a coding agent | "Write the `PerconaServerMongoDB` CR with scheduled backups + PITR"; "generate the `my.cnf` for PS 8.4" | A renamed CR field, a removed flag, or `innodb_log_file_size` on 8.4 - applies cleanly, fails later | The agent looks the field up `version`-scoped mid-generation; the artifact cites real, current values | **strongest** - IDE/CI agents rarely have web, and the output is executable |
+| **SRE / on-call** running a headless or autonomous ops agent | A remediation runbook drafted with no human reviewing each line | A confidently-wrong recovery step (wrong SST method, deprecated bootstrap flag) | The freshest version-correct procedure, cited - the agent has no other source | no web, no human, highest cost of wrong |
 | **App developer (not a DBA)** using Cursor/Copilot to stand up Percona | "Back up this 300 GB Percona MySQL"; "migrate our Atlas Mongo to self-hosted" | Reaches for `mysqldump` / `mongosync`, misses XtraBackup / Percona ClusterSync | Surfaces the Percona-native tool the dev didn't know to ask for | depends whether their agent has web |
 | **Smaller / local models** (Llama, Qwen via Ollama; air-gapped) | Any Percona question | More stale defaults and version blur than a frontier model | Connector + skill correct what the model can't | the gap is widest here |
 | **Agent builders / ISVs** embedding percona-dk in their own product | They need Percona knowledge as a dependency, not a thing to build | Hand-maintain a fact base, or accept hallucinations | One endpoint = a maintained, daily-fresh Percona knowledge layer | they ship to their own no-web agents |
 
-The honest non-target: **a person in a chat with web search asking "how do I configure X."** A strong model gets there on its own; percona-dk ties it (cited, less drift) rather than beating it. Build for the agents that *can't go look* — that's where it's real.
+The honest non-target: **a person in a chat with web search asking "how do I configure X."** A strong model gets there on its own; percona-dk ties it (cited, less drift) rather than beating it. Build for the agents that *can't go look* - that's where it's real.
 
 ## Skills, the knowledge MCP, and why percona-dk has both
 
 Two layers, different jobs:
 
-- **A skill** is a static briefing the agent loads into context — *what to recommend and what to avoid* ("use XtraBackup, not `mysqldump`"; "Percona Server is not PXC"). Zero infrastructure, always present. But it's a snapshot a human wrote: it **goes stale**, it can't carry a 16,000-thread forum, and it can't hand a no-web agent a fact that postdates the model.
-- **The knowledge MCP** (this project) is live retrieval of the *actual current text* — version-tagged, re-ingested daily, docs + blog + forum. It's the only layer that can give an offline agent a release that shipped after its training cutoff.
+- **A skill** is a static briefing the agent loads into context - *what to recommend and what to avoid* ("use XtraBackup, not `mysqldump`"; "Percona Server is not PXC"). Zero infrastructure, always present. But it's a snapshot a human wrote: it **goes stale**, it can't carry a 16,000-thread forum, and it can't hand a no-web agent a fact that postdates the model.
+- **The knowledge MCP** (this project) is live retrieval of the *actual current text* - version-tagged, re-ingested daily, docs + blog + forum. It's the only layer that can give an offline agent a release that shipped after its training cutoff.
 
 You want both: the skill tells the agent *what to say first and when to look something up*; percona-dk tells it *what's actually true on this version, right now*. The companion [Percona skills](https://github.com/Percona-Lab/skills) pair with this server for exactly that.
 
-This split is a deliberate design choice. percona-dk is the **documentation/knowledge MCP** — live, version-scoped retrieval of the official Percona corpus, distinct from an MCP that queries a live database — and it has shipped since March 2026. It pairs with the [companion Percona skills](https://github.com/Percona-Lab/skills) for the "what to recommend" half. The trade-off is honest — if your agents mostly have web access, static skills plus doc links go a long way; the knowledge MCP earns its keep specifically for the no-web, version-sensitive, executable-output loop described above.
+This split is a deliberate design choice. percona-dk is the **documentation/knowledge MCP** - live, version-scoped retrieval of the official Percona corpus, distinct from an MCP that queries a live database - and it has shipped since March 2026. It pairs with the [companion Percona skills](https://github.com/Percona-Lab/skills) for the "what to recommend" half. The trade-off is honest - if your agents mostly have web access, static skills plus doc links go a long way; the knowledge MCP earns its keep specifically for the no-web, version-sensitive, executable-output loop described above.
 
 ## Supported tools
 
@@ -131,9 +132,9 @@ Percona doc repos (GitHub)
 └───────┘ └───────┘
 ```
 
-- **Ingestion pipeline** — clones Percona doc repos, parses Markdown and reStructuredText sections, embeds locally (no API keys needed)
-- **REST API** — `POST /search`, `GET /document/{repo}/{path}`, `GET /health`, `GET /stats`
-- **MCP server** — `search_percona_docs` and `get_percona_doc` tools for any MCP-compatible client
+- **Ingestion pipeline** - clones Percona doc repos, parses Markdown and reStructuredText sections, embeds locally (no API keys needed)
+- **REST API** - `POST /search`, `GET /document/{repo}/{path}`, `GET /health`, `GET /stats`
+- **MCP server** - `search_percona_docs` and `get_percona_doc` tools for any MCP-compatible client
 
 ## Content sources
 
@@ -180,7 +181,7 @@ The MySQL stack and Tools are indexed by default. MongoDB, PostgreSQL, Kubernete
 
 ### Adding repos after installation
 
-Re-run the installer — it will show your current selection with existing repos pre-ticked, detect the change, and prompt you to re-index:
+Re-run the installer - it will show your current selection with existing repos pre-ticked, detect the change, and prompt you to re-index:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Percona-Lab/percona-dk/main/install-percona-dk | bash
@@ -295,7 +296,7 @@ If you just want the default single-user experience, stick with the stdio instal
 
 ## Keeping docs up to date
 
-The MCP server **automatically syncs** docs in the background. On each startup, it checks when the last sync ran. If it's been more than 7 days (configurable), it pulls the latest from GitHub and re-embeds only the files that changed — all in the background so the server starts immediately. Existing data stays searchable during the sync.
+The MCP server **automatically syncs** docs in the background. On each startup, it checks when the last sync ran. If it's been more than 7 days (configurable), it pulls the latest from GitHub and re-embeds only the files that changed - all in the background so the server starts immediately. Existing data stays searchable during the sync.
 
 Configure the refresh interval in `.env`:
 
@@ -355,10 +356,10 @@ percona-dk/
 Potential next steps:
 
 - **Deeper agent affordances** -- structured/typed results, "is X supported in version Y" as a first-class answer, and empty-result guidance that tells the agent what to try next, as AI-generated install scripts, playbooks, and CRs become standard workflow
-- **Better embeddings** — swap in a larger model for improved search quality
-- **Source-type filtering** — let clients restrict searches to docs-only, community-only, or weight them differently
-- **Additional sources** — knowledge base articles, release notes archives, conference talk transcripts
-- **Hosted service** — centrally hosted API for team-wide or customer access
+- **Better embeddings** - swap in a larger model for improved search quality
+- **Source-type filtering** - let clients restrict searches to docs-only, community-only, or weight them differently
+- **Additional sources** - knowledge base articles, release notes archives, conference talk transcripts
+- **Hosted service** - centrally hosted API for team-wide or customer access
 
 ## License
 
