@@ -2,23 +2,37 @@
 
 > **Status:** Fully functional. 22 doc repos across 7 stacks, plus the Percona Community blog and the Percona forums. MCP + REST API working. Supports Markdown and reStructuredText. With community interest, this could grow into an official Percona developer resource.
 
-Semantic search and retrieval of Percona documentation, community blog posts, and forum threads for AI assistants and developer tools.
+**percona-dk is a ground-truth Percona lookup for AI coding agents.** When an agent — Claude Code, Cursor, Copilot, Codex, or any MCP/HTTP client — writes the install scripts, Ansible playbooks, Terraform, Kubernetes operator CRs, `my.cnf`/`mongod.conf`, Dockerfiles, or runbooks that stand up and operate Percona software, it calls percona-dk to ground each Percona-specific fact in current, version-correct, cited documentation instead of training-data memory.
 
-**percona-dk** ingests three kinds of Percona knowledge — official docs from GitHub repos, blog posts from [percona.community](https://percona.community/blog/), and threads from [forums.percona.com](https://forums.percona.com) — chunks and embeds them locally, and exposes them via REST API and [MCP](https://modelcontextprotocol.io/) server. Your AI tools get accurate, up-to-date Percona knowledge, not stale training data, not fragile web scraping.
+It ingests three kinds of Percona knowledge — official docs from 22 GitHub repos, ~280 [percona.community](https://percona.community/blog/) blog posts, and ~16,000 [forums.percona.com](https://forums.percona.com) threads — chunks and embeds them locally, and serves them over [MCP](https://modelcontextprotocol.io/) and a REST API. Everything runs on your machine: no API keys, no scraping.
 
-**Where it helps most today:** people asking AI tools Percona questions and acting on the answers -- configuring, debugging, planning. **Where it matters most (and growing fast):** when AI tools write install scripts, Ansible playbooks, Terraform configs, or step-by-step guides for Percona products. That output goes to real infrastructure. Without percona-dk, it comes from stale training data: wrong package names, deprecated flags, missing safety checks. With percona-dk, the AI pulls from current official docs. The human still reviews and runs it, but the starting point is accurate instead of plausible.
+## Why an agent needs this
 
-## Why this matters
+AI coding agents increasingly write the code that deploys and operates databases. That output is **executable and it ships to real infrastructure** — so the failure mode that matters isn't "the agent sounds unsure," it's **confident, plausible, and wrong**: a package name from the wrong repo, a flag removed two releases ago, a config key that's valid on 8.0 but gone on 8.4, an operator CR field that was renamed. It looks right. It runs. Then a node won't rejoin the cluster, or a backup turns out to be silently unrestorable.
 
-It's not just about new information. Percona DK helps in four distinct ways:
+Three things push an agent toward that failure mode, and percona-dk addresses each:
 
-1. **New features the LLM can't know about** -- PXC 8.4 added a Clone plugin for SST in April 2025. No LLM has this in training data. Without DK, the AI confidently tells you the feature doesn't exist.
+- **No web in the loop.** Most code generation happens with no web search — in an IDE, in CI, in a headless pipeline. The agent generates from training data, which has a cutoff and no Percona-specific grounding. percona-dk is a single tool call that returns the current answer, cited. **This is the case it's built for.**
+- **Training data blurs versions and leans upstream.** Models absorb far more upstream MySQL/MongoDB/PostgreSQL than Percona's specific deltas, and they blur 8.0 vs 8.4 syntax. Pass `version="8.4"` and every chunk — plus the resolved `docs.percona.com/...8.4/...` URL — is scoped to the branch the agent is generating for.
+- **The freshest facts postdate the model.** The corpus is re-ingested daily, so post-cutoff releases (e.g. Percona ClusterSync for MongoDB 0.8.1, the PXC Clone-plugin SST method) are present. A model with no web cannot know these at all.
 
-2. **Percona-specific products the LLM overlooks** -- Percona built a dedicated tool for Atlas-to-PSMDB migrations (Percona Link for MongoDB). Without DK, the AI recommends `mongosync` or a DIY approach. The right tool exists -- the LLM just doesn't know about it.
+**The honest boundary:** this is not pitched against a human in a browser. A person using a strong model *with* web search can usually reach the same public docs — for "how do I configure X," percona-dk ties that experience (cited inline, less drift) rather than beating it. The win is the *agent* loop: no web, executable output, version-sensitive, high cost of confidently wrong. It is largest for agents with no web access and for smaller tool-calling models that carry more stale defaults.
 
-3. **Operational details the LLM gets vaguely right but not precisely right** -- This is the most common day-to-day value. The AI gives you a reasonable answer, but DK gives you the exact flags, version constraints, setup gotchas (like needing to enable MongoDB profiling for PMM Query Analytics), and copy-paste commands from current docs. When you're writing production configs or answering a customer, "mostly right" isn't good enough.
+### What an agent gets wrong without it — each verified against the live corpus
 
-4. **Real-world troubleshooting and field wisdom the docs don't capture** -- Docs tell you what a feature does; the community tells you what actually happens when you use it. With blog posts and forum threads indexed alongside docs, the AI can surface real tuning numbers, known-good recovery procedures, reported bugs, integration patterns, and version-specific quirks that engineers have already worked through. Exact error messages from forum threads are especially valuable -- when a user pastes "[ERROR] WSREP: Failed to open backend connection", DK can surface the exact thread where someone else hit and solved it.
+🔵 *this model, no web, is actually wrong; percona-dk corrects it* · 🟡 *the corpus is the authoritative cite; a web chat ties*
+
+1. **🔵 A valid method the agent denies exists.** Asked whether PXC supports the Clone plugin as an SST method, this model with no web answers *"No, PXC does not."* Wrong: the [Clone SST method](https://docs.percona.com/percona-xtradb-cluster/8.4/clone-sst/) ships in PXC 8.4.4-4 ([PXC-4469](https://perconadev.atlassian.net/browse/PXC-4469), 2025-04-16) and is a tech-preview in 8.0 (`clone` has been in the default `wsrep_sst_allowed_methods` since 8.0.41). An agent scripting SST would omit a faster, supported option.
+
+2. **🔵 A Percona tool the agent overlooks.** Asked how to migrate MongoDB Atlas to self-hosted PSMDB, this model with no web recommends MongoDB's `mongosync` and states Percona has no dedicated tool. It does: [Percona ClusterSync for MongoDB (PCSM)](https://docs.percona.com/pcsm/latest/) — formerly Percona Link for MongoDB, current 0.8.1 — does change-stream replication for minimal-downtime migration. (Per the [forum guideline](https://forums.percona.com/t/guideline-for-migrating-from-atlas-cluster-to-percona-mongodb/36958), truly *zero*-downtime Atlas exits are constrained because Atlas doesn't expose backend nodes — plan for minimal, not zero.)
+
+3. **🟡 Removed flags that still look current.** Training data is full of `innobackupex` (removed in XtraBackup 8.0 — use the `xtrabackup` binary), `--compress=quicklz` (removed for backup in 8.0.34-29 — the default is now ZSTD), and `innodb_track_changed_pages` (deprecated PS 8.0.27, **removed 8.0.30** — use `--page-tracking`). A strong model often knows these; a weaker one writes them into a script verbatim. The corpus is the authoritative check either way.
+
+4. **🟡 Version-correct config in generated files.** Generating a `my.cnf` for PS 8.4, a model may reach for `innodb_log_file_size` — removed in 8.4, where `innodb_redo_log_capacity` is the only knob. `search_percona_docs(query, version="8.4")` returns only 8.4-tagged chunks, so the emitted config matches the target branch.
+
+5. **🟡 Operator CR field reference.** Operator Custom Resource fields shift between releases; the corpus carries each operator's [CR options reference](https://docs.percona.com/k8spsmdb/latest/operator/) so an agent writing a `PerconaServerMongoDB` (or PXC/PG) manifest cites real fields instead of guessing.
+
+**Verify in 60 seconds:** ask any of these with **web search off** — the real condition inside most coding agents — first with the connector off, then on. Watch for the removed flag, the wrong-branch config key, or the Percona-specific tool the agent never reaches for.
 
 ## Supported tools
 
@@ -45,17 +59,6 @@ percona-dk works with any AI tool that supports MCP or HTTP APIs:
 
 > **LLM compatibility:** MCP is a protocol, not a model feature. Any LLM with tool/function-calling support works, including Claude, GPT-4o, Gemini, Qwen, Llama (via Ollama), Mistral, and others. Reasoning-only models without tool-calling support are not compatible.
 
-## Why
-
-Every AI tool you use has Percona in its training data. The problem is that training data is stale, incomplete, and sometimes wrong:
-
-- **Deprecated syntax** -- LLMs still recommend `innobackupex` (removed in XtraBackup 8.0) and hallucinate flags that don't exist.
-- **Missing Percona-specific features** -- Percona Server has features upstream MySQL doesn't, and vice versa. Generic training data doesn't distinguish them. Percona built a dedicated tool for Atlas-to-PSMDB migrations (Percona Link for MongoDB), but without DK, the AI recommends `mongosync` or a DIY approach.
-- **Wrong product version** -- An answer based on MySQL 5.7 docs applied to Percona Server 8.4 can silently break things.
-- **No source citations** -- Without DK, you get confident answers with no way to verify against official docs.
-
-Today, the main value is accurate answers to day-to-day Percona questions. Increasingly, AI tools are also writing install scripts, playbooks, and configs that go straight to real infrastructure -- and that's where stale training data does the most damage.
-
 ## Quick start
 
 **macOS / Linux:**
@@ -68,21 +71,18 @@ curl -fsSL https://raw.githubusercontent.com/Percona-Lab/percona-dk/main/install
 irm https://raw.githubusercontent.com/Percona-Lab/percona-dk/main/install-percona-dk.ps1 | iex
 ```
 
-During install you'll be asked to choose a mode:
+This is a **full local install** - it clones the Percona doc repos, builds a local ChromaDB index, and runs a local MCP server against it. Everything stays on your machine; it works completely offline once indexed. First-run takes minutes to hours depending on how many sources you select.
 
-- **Shared instance** (recommended for Percona employees on VPN) - installs a tiny local bridge so Claude Desktop / Claude Code / Cursor / Windsurf can talk to the shared Percona DK on sherpa. Install finishes in under a minute. Docs, blog, and forums stay current automatically because sherpa refreshes daily. Requires Percona VPN to get results; off-VPN the connector stays active and tool calls return a "VPN required" message instead of breaking the client.
-- **Full local install** - clones Percona doc repos, builds a local ChromaDB index, runs a local MCP server against it. Works completely offline once indexed. First-run takes minutes to hours depending on how many sources are selected. Use this if you don't have VPN access, want offline capability, or want to customize which repos are indexed.
-
-The installer handles everything for the mode you pick:
+The installer handles everything:
 
 - Installs `uv` if needed (downloads Python 3.12 automatically - no system Python required)
 - Clones the repo to `~/percona-dk` and creates an isolated virtual environment
 - Auto-configures Claude Desktop, Claude Code, Cursor, and Windsurf
-- (Local mode only) Walks you through which doc repos to index, runs initial ingestion, sets up auto-refresh
+- Walks you through which doc repos to index, runs initial ingestion, sets up auto-refresh
 
-Safe to re-run - detects existing installs, preserves your config, and pre-selects the mode you chose previously.
+Safe to re-run - detects existing installs and preserves your config.
 
-> **Note:** In Percona's Claude Teams workspace, user-added custom connectors are disabled at the org level. That means you cannot point Claude Desktop or claude.ai directly at `http://sherpa.tp.int.percona.com:8402/sse` via Settings > Connectors. The curl installer above is the supported path because it writes the MCP entry to Claude Desktop / Claude Code's local config file, which is not subject to the custom-connector policy.
+> **Want one shared instance for a team instead of a copy per machine?** Run the server once over HTTP and point every client at a URL - see [Run as a streamable HTTP MCP server (beta)](#run-as-a-streamable-http-mcp-server-beta) below.
 
 ## What it does
 
@@ -209,6 +209,65 @@ For OpenAI Codex CLI, add to `~/.codex/config.toml`:
 command = ["/path/to/percona-dk/.venv/bin/percona-dk-mcp"]
 ```
 
+## Run as a streamable HTTP MCP server (beta)
+
+By default the MCP server runs over **stdio**, which means each AI tool spawns its own local subprocess. That's the simplest setup and what the installer wires up. If you'd rather run percona-dk **once** as a long-running HTTP service -- so multiple clients (or remote clients, or clients that prefer URL-based connectors) can all hit the same instance -- the server also supports two HTTP transports:
+
+- **`streamable-http`** -- the current MCP HTTP transport. Recommended for new clients.
+- **`sse`** -- the older Server-Sent Events transport. Still supported for clients that haven't moved to streamable-http yet.
+
+Both are marked beta because the upstream MCP HTTP transports are still evolving and not every client implements them the same way. The stdio path is the stable default.
+
+Start the server in HTTP mode:
+
+```bash
+# Streamable HTTP (recommended)
+~/percona-dk/.venv/bin/percona-dk-mcp --transport streamable-http --host 0.0.0.0 --port 8402
+
+# SSE (for older clients)
+~/percona-dk/.venv/bin/percona-dk-mcp --transport sse --host 0.0.0.0 --port 8402
+```
+
+The endpoint is `http://your-host:8402/mcp` for streamable-http, or `http://your-host:8402/sse` for SSE.
+
+### Where it works (and where it won't) -- read this before you pick a URL
+
+**Which URL is reachable depends on *who* connects to it.** There are two connection models, and the difference matters:
+
+- **Clients that connect from your own machine** -- Cursor, Windsurf, Zed, Continue, Cline, and the `mcp-remote` bridge (below). These reach whatever address *your machine* can reach: `localhost`, a LAN/private IP, a VPN address, or a public URL all work.
+- **Native "add a custom connector by URL" in Claude Desktop / claude.ai** -- these do **not** connect from your machine. They proxy the MCP traffic through Anthropic's servers, so the endpoint has to be reachable **from the public internet** -- a publicly resolvable HTTPS URL (ideally with auth and TLS). A `localhost` or LAN-only address will appear to add but every tool call will fail, because Anthropic's cloud can't reach your laptop.
+
+So:
+
+| You're hosting on... | Cursor / Windsurf / `mcp-remote` (connect from your machine) | Claude Desktop / claude.ai native custom connector (proxied through Anthropic) |
+|---|---|---|
+| `localhost` / LAN / private IP | ✅ works | ❌ won't reach it |
+| VPN-only address | ✅ works (if you're on the VPN) | ❌ won't reach it |
+| Public HTTPS URL | ✅ works | ✅ works |
+
+**For Claude Desktop / Claude Code against a `localhost` or LAN instance, use the `mcp-remote` bridge** -- it runs on your machine, connects locally, and exposes the server to Claude over stdio, sidestepping the public-reachability requirement entirely:
+
+```json
+{
+  "mcpServers": {
+    "percona-dk": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://your-host:8402/mcp"]
+    }
+  }
+}
+```
+
+Only reach for a *native* URL custom connector when the instance is already on a public HTTPS URL.
+
+Use cases this unlocks:
+
+- **One shared instance for a team** -- index once on a server, let everyone's IDE hit the same corpus instead of each engineer running a local copy. On a LAN/private network, every client connects directly; expose it publicly only if you also need native Claude custom connectors.
+- **Lightweight clients** -- machines that don't have Python or `uv` installed can still use percona-dk by pointing at a remote URL.
+- **Custom connectors** -- any client that adds an MCP server by URL can connect, subject to the reachability rules above (direct-connect clients work on any address they can reach; native Claude connectors need a public URL).
+
+If you just want the default single-user experience, stick with the stdio install from the Quick Start -- no flags needed.
+
 ## Keeping docs up to date
 
 The MCP server **automatically syncs** docs in the background. On each startup, it checks when the last sync ran. If it's been more than 7 days (configurable), it pulls the latest from GitHub and re-embeds only the files that changed — all in the background so the server starts immediately. Existing data stays searchable during the sync.
@@ -270,9 +329,8 @@ percona-dk/
 
 Potential next steps:
 
-- **Optimized for AI-assisted ops** -- Better tool descriptions and response formats as AI-generated install scripts, playbooks, and configs become standard workflow
+- **Deeper agent affordances** -- structured/typed results, "is X supported in version Y" as a first-class answer, and empty-result guidance that tells the agent what to try next, as AI-generated install scripts, playbooks, and CRs become standard workflow
 - **Better embeddings** — swap in a larger model for improved search quality
-- **Version-aware search** — filter results by product version (8.0 vs 8.4)
 - **Source-type filtering** — let clients restrict searches to docs-only, community-only, or weight them differently
 - **Additional sources** — knowledge base articles, release notes archives, conference talk transcripts
 - **Hosted service** — centrally hosted API for team-wide or customer access
