@@ -165,28 +165,18 @@ _REPO_URL_MAP: dict[str, tuple[str, str | None]] = {
     "percona/k8sps-docs":           ("percona-operator-for-mysql/ps", ""),
     "percona/k8spxc-docs":          ("percona-operator-for-mysql/pxc", ""),
     "percona/k8spsmdb-docs":        ("percona-operator-for-mongodb", ""),
-    "percona/k8spg-docs":           ("percona-operator-for-postgresql", ""),
+    "percona/k8spg-docs":           ("percona-operator-for-postgresql", None),  # versioned site: "" 404s, None -> /latest/ resolves
     "percona/percona-toolkit":      ("percona-toolkit", ""),
     "percona/pg_tde":               ("pg-tde", ""),
     "percona/pgsm-docs":            ("pg-stat-monitor", ""),
     "percona/percona-valkey-doc":   ("valkey", ""),
     "openeverest/everest-doc":      ("everest", ""),
     "percona/proxysql-admin-tool-doc": ("proxysql", ""),
-    # No public docs.percona.com pages (yet) — fall back to GitHub source URLs:
-    # percona/ps-binlog-server-docs, percona/pmm_dump_docs,
-    # percona/pcsm-docs, percona/repo-config-docs
-}
-
-# Repos whose docs site is built with mkdocs `use_directory_urls: false`
-# (or Sphinx) — their published page URLs end in `.html`, not a trailing
-# slash. Every other mapped repo uses directory-style URLs (trailing slash).
-# Getting this wrong yields 404s (e.g. /pg-tde/variables/ vs the real
-# /pg-tde/variables.html).
-_HTML_URL_REPOS: set[str] = {
-    "percona/pg_tde",
-    "percona/pgsm-docs",
-    "percona/percona-valkey-doc",
-    "percona/percona-toolkit",
+    "percona/pcsm-docs":            ("percona-clustersync-for-mongodb", ""),
+    "percona/pmm_dump_docs":        ("pmm-dump-documentation", ""),
+    "percona/repo-config-docs":     ("percona-software-repositories", ""),
+    # No public docs.percona.com pages — fall back to GitHub source URLs:
+    # percona/ps-binlog-server-docs
 }
 
 
@@ -228,11 +218,13 @@ def _build_page_url(repo_slug: str, file_path: str, version: str | None = None) 
     if version_segment:
         base = f"{base}/{version_segment}"
 
+    # docs.percona.com serves every product as static `.html`. The per-repo
+    # mkdocs `use_directory_urls` setting only affects a local build, not the
+    # published platform - a trailing-slash URL works solely because the site
+    # redirects it to `.html`, so emit the canonical `.html` form directly.
     if rel == "":
-        return f"{base}/"
-    if repo_slug in _HTML_URL_REPOS:
-        return f"{base}/{rel}.html"
-    return f"{base}/{rel}/"
+        return f"{base}/"            # site / section root (serves index.html)
+    return f"{base}/{rel}.html"
 
 
 def chunk_markdown(text: str, repo_slug: str, file_path: str, version: str | None = None) -> list[dict]:
