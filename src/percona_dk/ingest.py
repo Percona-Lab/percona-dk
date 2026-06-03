@@ -177,6 +177,18 @@ _REPO_URL_MAP: dict[str, tuple[str, str | None]] = {
     # percona/pcsm-docs, percona/repo-config-docs
 }
 
+# Repos whose docs site is built with mkdocs `use_directory_urls: false`
+# (or Sphinx) — their published page URLs end in `.html`, not a trailing
+# slash. Every other mapped repo uses directory-style URLs (trailing slash).
+# Getting this wrong yields 404s (e.g. /pg-tde/variables/ vs the real
+# /pg-tde/variables.html).
+_HTML_URL_REPOS: set[str] = {
+    "percona/pg_tde",
+    "percona/pgsm-docs",
+    "percona/percona-valkey-doc",
+    "percona/percona-toolkit",
+}
+
 
 def _build_page_url(repo_slug: str, file_path: str, version: str | None = None) -> str:
     """Construct a docs.percona.com URL from repo slug and file path.
@@ -185,10 +197,17 @@ def _build_page_url(repo_slug: str, file_path: str, version: str | None = None) 
     GitHub source URL for repos that aren't published on docs.percona.com.
     """
     rel = file_path
-    for prefix in ("docs/", "source/"):
+    # Strip the repo's doc-source folder prefix. Most repos keep docs under
+    # docs/ (or source/ for older Sphinx layouts); pg_tde uses
+    # documentation/docs/. Most-specific prefix first.
+    for prefix in ("documentation/docs/", "docs/", "source/"):
         if rel.startswith(prefix):
             rel = rel[len(prefix):]
+            break
     rel = re.sub(r"\.(md|rst)$", "", rel)
+    rel = re.sub(r"/index$", "", rel)   # section index -> its directory
+    if rel == "index":
+        rel = ""                        # site root
 
     mapping = _REPO_URL_MAP.get(repo_slug)
     if mapping is None:
@@ -205,9 +224,15 @@ def _build_page_url(repo_slug: str, file_path: str, version: str | None = None) 
     else:
         version_segment = default_version  # "" allowed for unversioned URLs
 
+    base = f"https://docs.percona.com/{url_slug}"
     if version_segment:
-        return f"https://docs.percona.com/{url_slug}/{version_segment}/{rel}/"
-    return f"https://docs.percona.com/{url_slug}/{rel}/"
+        base = f"{base}/{version_segment}"
+
+    if rel == "":
+        return f"{base}/"
+    if repo_slug in _HTML_URL_REPOS:
+        return f"{base}/{rel}.html"
+    return f"{base}/{rel}/"
 
 
 def chunk_markdown(text: str, repo_slug: str, file_path: str, version: str | None = None) -> list[dict]:
