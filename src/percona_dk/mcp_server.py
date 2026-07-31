@@ -48,6 +48,20 @@ CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
 REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "7"))  # auto-refresh if older than N days
 LAST_INGEST_FILE = DATA_DIR / ".last_ingest"
+# Per-peer ceiling. Deliberately generous: the limiter also counts MCP protocol
+# traffic (each session's initialize), and native Claude connectors proxy every
+# user through a handful of Anthropic egress IPs, so one bucket can front many
+# unrelated people. Too low here throttles legitimate users, not just abusers.
+RATE_LIMIT_RPS = float(os.getenv("RATE_LIMIT_RPS", "20"))
+RATE_LIMIT_BURST = int(os.getenv("RATE_LIMIT_BURST", "100"))
+# Whole-server ceiling, so a flood spread across many IPs still can't saturate
+# the single VM this runs on.
+RATE_LIMIT_GLOBAL_RPS = float(os.getenv("RATE_LIMIT_GLOBAL_RPS", "100"))
+RATE_LIMIT_GLOBAL_BURST = int(os.getenv("RATE_LIMIT_GLOBAL_BURST", "300"))
+# Number of reverse proxies in front of this server that append to
+# X-Forwarded-For. Anything a client sends in that header arrives as the
+# leading entries, so we count back from the right to find the real peer.
+TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
 
 _startup_time = time.time()
 
@@ -229,6 +243,29 @@ def _get_repo_versions() -> dict[str, list[str]]:
         log.warning("Failed to compute repo->versions map", exc_info=True)
     _repo_versions_cache = {r: sorted(vs) for r, vs in out.items()}
     return _repo_versions_cache
+
+
+def _rate_limit_client_id(_context) -> str:
+    """Identify the calling peer for rate limiting, honoring X-Forwarded-For.
+
+    Behind a reverse proxy every request's socket peer is the proxy itself, so
+    keying on it would collapse all traffic into one bucket and throttle the
+    whole server at once. X-Forwarded-For is only trustworthy from the right:
+    our proxy appends the true peer, while a client can forge any number of
+    leading entries to dodge its own bucket.
+    """
+    from fastmcp.server.dependencies import get_http_request
+
+    try:
+        request = get_http_request()
+    except RuntimeError:
+        return "local"  # stdio / in-process caller, no HTTP layer
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    hops = [h.strip() for h in forwarded.split(",") if h.strip()]
+    if len(hops) >= TRUSTED_PROXY_HOPS:
+        return hops[-TRUSTED_PROXY_HOPS]
+    return request.client.host if request.client else "unknown"
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -498,6 +535,24 @@ def main():
     if args.transport == "stdio":
         mcp.run()
     else:
+        from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
+
+        mcp.add_middleware(RateLimitingMiddleware(
+            max_requests_per_second=RATE_LIMIT_GLOBAL_RPS,
+            burst_capacity=RATE_LIMIT_GLOBAL_BURST,
+            global_limit=True,
+        ))
+        mcp.add_middleware(RateLimitingMiddleware(
+            max_requests_per_second=RATE_LIMIT_RPS,
+            burst_capacity=RATE_LIMIT_BURST,
+            get_client_id=_rate_limit_client_id,
+        ))
+        log.info(
+            "Rate limiting: %.1f req/s per peer (burst %d), %.1f req/s global "
+            "(burst %d), %d trusted proxy hop(s)",
+            RATE_LIMIT_RPS, RATE_LIMIT_BURST,
+            RATE_LIMIT_GLOBAL_RPS, RATE_LIMIT_GLOBAL_BURST, TRUSTED_PROXY_HOPS,
+        )
         mcp.run(transport=args.transport, host=args.host, port=args.port)
 
 
