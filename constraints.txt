@@ -1,0 +1,25 @@
+# Pinned runtime versions for the pdk.percona.com deployment.
+#
+# These are the exact versions the production VM has been running since
+# 2026-04-16. deploy.sh installs with `pip install -c constraints.txt .` so a
+# redeploy ships only the code change and never silently upgrades a dependency
+# underneath a working server.
+#
+# pyproject.toml intentionally keeps wider ranges: self-hosted copies should be
+# free to resolve their own versions. This file is the deployment's opinion, not
+# the package's requirement.
+#
+# To move the deployment forward: bump a version here, redeploy, and confirm
+# /health plus an end-to-end search before committing the bump.
+
+fastmcp==3.2.4
+mcp==1.27.0
+starlette==1.0.0
+uvicorn==0.44.0
+chromadb==1.5.7
+fastapi==0.135.3
+gitpython==3.1.46
+python-dotenv==1.2.2
+requests==2.33.1
+beautifulsoup4==4.14.3
+lxml==6.1.0
