@@ -84,6 +84,13 @@ def _background_refresh():
 
 def _maybe_refresh():
     """Check if data is stale and kick off background refresh if needed."""
+    # 0 (or negative) disables auto-refresh entirely, as documented in
+    # .env.example. Without this guard the staleness check below treats any
+    # corpus with a past mtime as stale, so REFRESH_DAYS=0 would re-ingest on
+    # every startup rather than never.
+    if REFRESH_DAYS <= 0:
+        log.info("Auto-refresh disabled (REFRESH_DAYS=%d)", REFRESH_DAYS)
+        return
     days = _days_since_last_ingest()
     if days is None:
         log.info("No ingested data found — run 'percona-dk-ingest' first")
