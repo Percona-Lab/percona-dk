@@ -114,7 +114,7 @@ def corpus(tmp_path, monkeypatch):
         monkeypatch.setattr(mod, "_collection", col)
         monkeypatch.setattr(mod, "_repo_versions_cache", None)
         monkeypatch.setattr(mod, "REPOS_DIR", repos)
-    monkeypatch.setattr(mcp_server, "FEEDBACK_FILE", tmp_path / "feedback.jsonl")
+        monkeypatch.setattr(mod, "FEEDBACK_FILE", tmp_path / "feedback.jsonl")
     return tmp_path
 
 

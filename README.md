@@ -133,7 +133,7 @@ Percona doc repos (GitHub)
 ```
 
 - **Ingestion pipeline** - clones Percona doc repos, parses Markdown and reStructuredText sections, embeds locally (no API keys needed)
-- **REST API** - `POST /search`, `GET /search` (Markdown, for agents), `GET /document/{repo}/{path}`, `GET /health`, `GET /stats`
+- **REST API** - `POST /search`, `GET /search` (Markdown, for agents), `GET /document/{repo}/{path}`, `GET /document?url=...`, `POST /feedback`, `GET /health`, `GET /stats`
 - **MCP server** - `search_percona_docs`, `get_percona_doc` and `give_feedback` tools for any MCP-compatible client (see [MCP tools](#mcp-tools))
 
 ## MCP tools
@@ -154,11 +154,13 @@ Percona doc repos (GitHub)
 
 Call again with that `offset` for the next page. Pass a larger `max_chars` to get more in one call.
 
-**Agent feedback.** `give_feedback` tells agents to report, without asking the user first, when a doc is wrong, missing, contradictory or outdated, when a product behaves differently from its docs, or when a percona-dk tool misbehaves. `category` is one of `documentation`, `product`, `mcp_server` or `other`; `severity` is optional (`high`, `medium`, `low`). Each submission is appended as one JSON line, with a UTC timestamp and a short id, to `$DATA_DIR/feedback.jsonl` on the machine running the MCP server. Nothing is sent anywhere else. Review it with:
+**Agent feedback.** `give_feedback` tells agents to report, without asking the user first, when a doc is wrong, missing, contradictory or outdated, when a product behaves differently from its docs, or when a percona-dk tool misbehaves. `category` is one of `documentation`, `product`, `mcp_server` or `other`; `severity` is optional (`high`, `medium`, `low`). Each submission is appended as one JSON line, with a UTC timestamp and a short id, to `$DATA_DIR/feedback.jsonl` on the machine running the MCP server (for the remote shim, that is the shared instance). Nothing is sent anywhere else. Review it with:
 
 ```bash
 tail -n 20 ~/percona-dk/data/feedback.jsonl | jq .
 ```
+
+**Remote shim.** Internal users who connect through `percona-dk-mcp-remote` (a local stdio MCP that forwards to the shared instance's REST API, see `src/percona_dk/mcp_remote_shim.py`) get the same three tools with the same arguments: `get_percona_doc` calls `GET /document` (by URL or by repo and path, with `max_chars` and `offset`) and `give_feedback` calls `POST /feedback`. Off VPN, every tool returns a "VPN required" message instead of failing.
 
 ## Content sources
 
@@ -364,7 +366,34 @@ An agent's web-fetch tool can usually only send GET, so `POST /search` is out of
 curl 'http://localhost:8000/search?q=pxc+bootstrap+first+node&version=8.4&top_k=3'
 ```
 
-An agent can then open any result's URL directly, or read the full page through `GET /document/{repo}/{path}?version=X`, using the repo's short name (the part after `percona/`, for example `pxb-docs`) and the path the result prints.
+An agent can then open any result's URL directly, or read the full page through `GET /document?url=...` with that URL, or through `GET /document/{repo}/{path}?version=X`, using the repo's short name (the part after `percona/`, for example `pxb-docs`) and the path the result prints.
+
+### GET /document
+
+Returns one page as JSON: `repo`, `version`, `path`, `content`, plus `offset` and `total_chars`. Identify the page either way:
+
+```bash
+# By the URL a search result prints; repo, path and version come from the index
+curl -G 'http://localhost:8000/document' \
+  --data-urlencode 'url=https://docs.percona.com/percona-xtrabackup/8.4/backup-overview.html'
+
+# By repo and path (version required for multi-version repos, else 409)
+curl 'http://localhost:8000/document/pxb-docs/docs/backup-overview.md?version=8.4'
+```
+
+Both forms take `max_chars` (default 30000) and `offset` and page large documents exactly like `get_percona_doc`: a cut page ends with a line giving the `offset` of the next one. An `offset` past the end returns 400; a URL that matches no indexed page returns 404.
+
+### POST /feedback
+
+Records a problem report in `$DATA_DIR/feedback.jsonl`, in the same format as the `give_feedback` tool. The body takes the same fields; `message` and `category` are required:
+
+```bash
+curl -X POST http://localhost:8000/feedback \
+  -H "Content-Type: application/json" \
+  -d '{"message": "innodb_log_file_size page is outdated for 8.4", "category": "documentation", "severity": "high"}'
+```
+
+The response is `{"id": "...", "category": "..."}`.
 
 ## How it works
 

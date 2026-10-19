@@ -5,15 +5,11 @@ Exposes search_percona_docs, get_percona_doc and give_feedback as MCP
 tools, consumable by Claude Desktop, Claude Code, Cursor, or any MCP client.
 """
 
-import json
 import os
 import logging
 import threading
 import time
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
 
 import chromadb
 from dotenv import load_dotenv
@@ -23,6 +19,9 @@ from starlette.responses import JSONResponse
 
 from percona_dk.shared import (
     DEFAULT_MAX_CHARS,
+    FeedbackCategory,
+    FeedbackSeverity,
+    append_feedback,
     format_search_markdown,
     paginate,
     resolve_page_url,
@@ -472,16 +471,12 @@ def _read_doc(repo: str, path: str, version: str | None) -> tuple[str | None, st
     return file_path.read_text(encoding="utf-8", errors="replace"), None
 
 
-_feedback_lock = threading.Lock()
-_FEEDBACK_MAX_CHARS = 8000  # per field; keeps a shared instance's log bounded
-
-
 @mcp.tool()
 def give_feedback(
     message: str,
-    category: Literal["documentation", "product", "mcp_server", "other"],
+    category: FeedbackCategory,
     context: str | None = None,
-    severity: Literal["high", "medium", "low"] | None = None,
+    severity: FeedbackSeverity | None = None,
     tool_name: str | None = None,
 ) -> str:
     """Report a problem with Percona docs or with this server, so the
@@ -510,23 +505,11 @@ def give_feedback(
         tool_name: Optional name of the percona-dk tool involved, e.g.
               "search_percona_docs".
     """
-    def _clip(value: str | None) -> str | None:
-        return value[:_FEEDBACK_MAX_CHARS] if value else value
-
-    entry = {
-        "id": uuid.uuid4().hex[:12],
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "category": category,
-        "severity": severity,
-        "tool_name": tool_name,
-        "message": _clip(message),
-        "context": _clip(context),
-    }
     try:
-        with _feedback_lock:
-            FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with FEEDBACK_FILE.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        entry = append_feedback(
+            FEEDBACK_FILE, message, category,
+            context=context, severity=severity, tool_name=tool_name,
+        )
     except OSError:
         log.exception("Failed to write feedback to %s", FEEDBACK_FILE)
         return "Error: Feedback could not be saved on the server."
