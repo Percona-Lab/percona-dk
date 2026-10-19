@@ -493,13 +493,20 @@ def give_feedback(
     Keep it short and concrete. Then carry on with the user's task;
     this does not fix anything in the current session.
 
+    Never include secrets or private data: no passwords, API keys,
+    tokens, connection strings, hostnames or IPs, customer names, or
+    the user's own config and data. Feedback is stored in plain text
+    and may be read by whoever runs this server. Describe the doc
+    problem, quoting only the Percona doc text, query or URL involved.
+
     Args:
         message: What is wrong, in one or two sentences.
         category: "documentation" (doc content), "product" (Percona
               software behavior), "mcp_server" (a percona-dk tool), or
               "other".
         context: Optional supporting detail: the query you ran, the page
-              URL, the version, the snippet that was wrong.
+              URL, the version, the doc snippet that was wrong. Redact
+              anything from the user's environment.
         severity: Optional "high" (would cause broken or unsafe output),
               "medium", or "low" (cosmetic).
         tool_name: Optional name of the percona-dk tool involved, e.g.

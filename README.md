@@ -154,7 +154,7 @@ Percona doc repos (GitHub)
 
 Call again with that `offset` for the next page. Pass a larger `max_chars` to get more in one call.
 
-**Agent feedback.** `give_feedback` tells agents to report, without asking the user first, when a doc is wrong, missing, contradictory or outdated, when a product behaves differently from its docs, or when a percona-dk tool misbehaves. `category` is one of `documentation`, `product`, `mcp_server` or `other`; `severity` is optional (`high`, `medium`, `low`). Each submission is appended as one JSON line, with a UTC timestamp and a short id, to `$DATA_DIR/feedback.jsonl` on the machine running the MCP server (for the remote shim, that is the shared instance). Nothing is sent anywhere else. Review it with:
+**Agent feedback.** `give_feedback` tells agents to report, without asking the user first, when a doc is wrong, missing, contradictory or outdated, when a product behaves differently from its docs, or when a percona-dk tool misbehaves. `category` is one of `documentation`, `product`, `mcp_server` or `other`; `severity` is optional (`high`, `medium`, `low`). The description also tells agents never to include secrets or private data (passwords, keys, tokens, hostnames, customer names, the user's own config). Each submission is appended as one JSON line, with a UTC timestamp and a short id, to `$DATA_DIR/feedback.jsonl` on the machine running the MCP server (for the remote shim, that is the shared instance). Nothing is sent anywhere else. Review it with:
 
 ```bash
 tail -n 20 ~/percona-dk/data/feedback.jsonl | jq .

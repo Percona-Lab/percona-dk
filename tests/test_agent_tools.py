@@ -298,3 +298,12 @@ def test_give_feedback_rejects_unknown_category(corpus):
     with pytest.raises(ToolError):
         call_tool("give_feedback", message="x", category="bogus")
     assert not (corpus / "feedback.jsonl").exists()
+
+
+def test_give_feedback_description_warns_against_secrets():
+    async def _desc():
+        async with Client(mcp_server.mcp) as c:
+            tools = {t.name: t for t in await c.list_tools()}
+            return tools["give_feedback"].description
+    desc = asyncio.run(_desc())
+    assert "Never include secrets or private data" in desc
