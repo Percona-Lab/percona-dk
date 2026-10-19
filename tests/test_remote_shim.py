@@ -78,6 +78,13 @@ def test_shim_tools_match_mcp_server():
         assert shim[name].description == local[name].description, name
 
 
+def test_shim_give_feedback_warns_against_secrets():
+    tool = list_tools(mcp_remote_shim.mcp)["give_feedback"]
+    assert "Never include secrets or private data" in tool.description
+    context_desc = " ".join(tool.inputSchema["properties"]["context"]["description"].split())
+    assert "Redact anything from the user's environment" in context_desc
+
+
 @pytest.mark.parametrize("args", [
     {"url": PXB_84},
     {"url": PXB_80 + "#taking-a-backup"},
