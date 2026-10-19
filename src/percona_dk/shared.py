@@ -1,14 +1,24 @@
 """
-Helpers shared by the MCP server (mcp_server.py) and the REST API (server.py).
+Helpers shared by the MCP server (mcp_server.py), the REST API (server.py)
+and the remote shim (mcp_remote_shim.py).
 
 Kept free of module-level config so both servers can pass in their own
-cached collection and repo->versions map.
+cached collection and repo->versions map. chromadb is imported for type
+hints only, so the shim can use this module without loading it.
 """
 
-import re
-from typing import Callable
+from __future__ import annotations
 
-import chromadb
+import json
+import re
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Literal
+
+if TYPE_CHECKING:
+    import chromadb
 
 
 def version_where(version: str | None) -> dict | None:
@@ -204,3 +214,47 @@ def paginate(text: str, max_chars: int = DEFAULT_MAX_CHARS, offset: int = 0) -> 
             f"arguments and offset={end}.]"
         )
     return page
+
+
+# ---------------------------------------------------------------------------
+# Agent feedback log
+# ---------------------------------------------------------------------------
+
+FeedbackCategory = Literal["documentation", "product", "mcp_server", "other"]
+FeedbackSeverity = Literal["high", "medium", "low"]
+
+FEEDBACK_MAX_CHARS = 8000  # per field; keeps a shared instance's log bounded
+_feedback_lock = threading.Lock()
+
+
+def append_feedback(
+    feedback_file: Path,
+    message: str,
+    category: str,
+    context: str | None = None,
+    severity: str | None = None,
+    tool_name: str | None = None,
+) -> dict:
+    """Append one feedback entry as a JSON line to `feedback_file`.
+
+    Used by the `give_feedback` MCP tool and by `POST /feedback`, so both
+    write the same format. Returns the entry written (with its short
+    `id`). Raises OSError if the file can't be written.
+    """
+    def _clip(value: str | None) -> str | None:
+        return value[:FEEDBACK_MAX_CHARS] if value else value
+
+    entry = {
+        "id": uuid.uuid4().hex[:12],
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "category": category,
+        "severity": severity,
+        "tool_name": tool_name,
+        "message": _clip(message),
+        "context": _clip(context),
+    }
+    with _feedback_lock:
+        feedback_file.parent.mkdir(parents=True, exist_ok=True)
+        with feedback_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return entry

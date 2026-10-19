@@ -17,7 +17,16 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from percona_dk.shared import format_search_markdown, version_where
+from percona_dk.shared import (
+    DEFAULT_MAX_CHARS,
+    FeedbackCategory,
+    FeedbackSeverity,
+    append_feedback,
+    format_search_markdown,
+    paginate,
+    resolve_page_url,
+    version_where,
+)
 
 # Find .env relative to repo root so the server works regardless of cwd.
 _pkg_dir = Path(__file__).resolve().parent.parent.parent
@@ -45,6 +54,7 @@ DATA_DIR = (_env_dir / _data_path).resolve() if not _data_path.is_absolute() els
 REPOS_DIR = DATA_DIR / "repos"
 CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
+FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"
 
 # ---------------------------------------------------------------------------
 # App
@@ -157,6 +167,19 @@ class SearchResponse(BaseModel):
     query: str
     results: list[SearchResult]
     suggestion: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    message: str
+    category: FeedbackCategory
+    context: str | None = None
+    severity: FeedbackSeverity | None = None
+    tool_name: str | None = None
+
+
+class FeedbackResponse(BaseModel):
+    id: str
+    category: str
 
 
 class HealthResponse(BaseModel):
@@ -292,8 +315,49 @@ def _resolve_repo_dirs(repo: str) -> list:
     ]
 
 
+@app.get("/document")
+def get_document_by_url(
+    url: str = Query(
+        ..., min_length=1,
+        description="A page URL as printed in a search result, e.g. "
+                    "https://docs.percona.com/percona-xtrabackup/8.4/backup-overview.html",
+    ),
+    max_chars: int = Query(default=DEFAULT_MAX_CHARS, description="Maximum characters of content to return."),
+    offset: int = Query(default=0, description="Character offset to start from, for the next page."),
+):
+    """Retrieve a doc page by its URL, as search results print it.
+
+    Example: GET /document?url=https://docs.percona.com/percona-xtrabackup/8.4/backup-overview.html
+
+    Repo, path and version are resolved from the index, so an 8.4 URL
+    returns the 8.4 file. Same response shape as the path form.
+    """
+    try:
+        resolved = resolve_page_url(_get_collection(), url)
+    except Exception:
+        log.warning("URL resolution failed for %r", url, exc_info=True)
+        resolved = None
+    if resolved is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No indexed page matches URL '{url}'. Pass a URL exactly as "
+                "a search_percona_docs result prints it, or use repo + path "
+                "(+ version) instead."
+            ),
+        )
+    repo, path, version = resolved
+    return _document_page(repo, path, version, max_chars, offset)
+
+
 @app.get("/document/{repo}/{path:path}")
-def get_document(repo: str, path: str, version: str | None = None):
+def get_document(
+    repo: str,
+    path: str,
+    version: str | None = None,
+    max_chars: int = Query(default=DEFAULT_MAX_CHARS, description="Maximum characters of content to return."),
+    offset: int = Query(default=0, description="Character offset to start from, for the next page."),
+):
     """Retrieve full Markdown content for a given doc page.
 
     Example: GET /document/psmysql-docs/docs/innodb-show-status.md?version=8.0
@@ -301,7 +365,15 @@ def get_document(repo: str, path: str, version: str | None = None):
     For multi-version repos (psmysql-docs, pxc-docs, pxb-docs,
     pdmysql-docs, psmdb-docs, postgresql-docs), `version` is required;
     when omitted, returns 409 with the available versions in the detail.
+
+    Content longer than `max_chars` (default 30000) is cut at a line
+    break and ends with a line giving the `offset` of the next page.
     """
+    return _document_page(repo, path, version, max_chars, offset)
+
+
+def _document_page(repo: str, path: str, version: str | None, max_chars: int, offset: int) -> dict:
+    """Read one doc file and return one page of it as the /document JSON body."""
     candidates = _resolve_repo_dirs(repo)
     if not candidates:
         raise HTTPException(status_code=404, detail=f"Repo '{repo}' not found in ingested repos")
@@ -338,12 +410,40 @@ def get_document(repo: str, path: str, version: str | None = None):
         raise HTTPException(status_code=400, detail="Invalid path")
 
     content = file_path.read_text(encoding="utf-8", errors="replace")
+    if offset > 0 and offset >= len(content):
+        raise HTTPException(
+            status_code=400,
+            detail=f"offset {offset} is past the end of the document ({len(content)} characters).",
+        )
     return {
         "repo": repo,
         "version": version,
         "path": path,
-        "content": content,
+        "content": paginate(content, max_chars=max_chars, offset=offset),
+        "offset": max(0, offset),
+        "total_chars": len(content),
     }
+
+
+@app.post("/feedback", response_model=FeedbackResponse)
+def feedback(req: FeedbackRequest):
+    """Record an agent's report of a doc or tool problem.
+
+    Appends one JSON line to DATA_DIR/feedback.jsonl, in the same format
+    as the `give_feedback` MCP tool. Used by the remote shim's
+    give_feedback.
+    """
+    try:
+        entry = append_feedback(
+            FEEDBACK_FILE, req.message, req.category,
+            context=req.context, severity=req.severity, tool_name=req.tool_name,
+        )
+    except OSError:
+        log.exception("Failed to write feedback to %s", FEEDBACK_FILE)
+        raise HTTPException(status_code=500, detail="Feedback could not be saved on the server.")
+
+    log.info("Feedback %s recorded (%s/%s)", entry["id"], req.category, req.severity or "-")
+    return FeedbackResponse(id=entry["id"], category=req.category)
 
 
 @app.get("/health", response_model=HealthResponse)
