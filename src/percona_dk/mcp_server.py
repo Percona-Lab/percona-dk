@@ -1,21 +1,33 @@
 """
 Percona Developer Knowledge — MCP Server
 
-Exposes search_percona_docs and get_percona_doc as MCP tools,
-consumable by Claude Desktop, Claude Code, Cursor, or any MCP client.
+Exposes search_percona_docs, get_percona_doc and give_feedback as MCP
+tools, consumable by Claude Desktop, Claude Code, Cursor, or any MCP client.
 """
 
+import json
 import os
 import logging
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import chromadb
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+from percona_dk.shared import (
+    DEFAULT_MAX_CHARS,
+    format_search_markdown,
+    paginate,
+    resolve_page_url,
+    version_where,
+)
 
 # Try to load .env from multiple locations so the server works
 # regardless of working directory (e.g. when launched by Claude Desktop).
@@ -48,6 +60,7 @@ CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
 REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "7"))  # auto-refresh if older than N days
 LAST_INGEST_FILE = DATA_DIR / ".last_ingest"
+FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"
 
 _startup_time = time.time()
 
@@ -334,87 +347,36 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
     """
     top_k = max(1, min(top_k, 20))
     collection = _get_collection()
-
-    where = None
-    if version:
-        where = {"$or": [
-            {"version": {"$eq": version}},
-            {"version": {"$eq": ""}},
-        ]}
-
-    results = collection.query(query_texts=[query], n_results=top_k, where=where)
-
-    if not results["documents"] or not results["documents"][0]:
-        from percona_dk.repo_registry import suggest_repos
-        suggestion = suggest_repos(query, 0.0)
-        msg = "No results found for your query."
-        if suggestion:
-            msg += suggestion
-        return msg
-
-    output_parts: list[str] = []
-    for i, (doc, meta, dist) in enumerate(
-        zip(results["documents"][0], results["metadatas"][0], results["distances"][0])
-    ):
-        score = round(1.0 - dist / 2.0, 4)
-        version_meta = meta.get("version") or ""
-        version_line = f"**Version:** {version_meta}\n" if version_meta else ""
-        output_parts.append(
-            f"### Result {i + 1} (relevance: {score})\n"
-            f"**Source:** {meta['source_repo']} - `{meta['file_path']}`\n"
-            f"{version_line}"
-            f"**Section:** {meta['heading_hierarchy']}\n"
-            f"**URL:** {meta['page_url']}\n\n"
-            f"{doc}\n"
-        )
-
-    log.info("MCP search: %r → %d results", query[:80], len(output_parts))
-
-    output = "\n---\n".join(output_parts)
-
-    # If any returned chunk is from a multi-version repo, hint that the
-    # caller can scope to a specific version. Helps the model avoid
-    # assuming a repo is "only partially indexed" when it's actually
-    # split across version-tagged subsets.
-    if not version:
-        repo_versions = _get_repo_versions()
-        repos_in_results = {
-            meta["source_repo"]
-            for meta in results["metadatas"][0]
-            if meta.get("version")
-        }
-        hint_lines = [
-            f"  - {r}: {', '.join(repo_versions[r])}"
-            for r in sorted(repos_in_results)
-            if len(repo_versions.get(r, [])) > 1
-        ]
-        if hint_lines:
-            output += (
-                "\n\n---\n"
-                "Some results above are from repos with multiple indexed "
-                "versions. To scope to one version, re-run with the "
-                "`version` argument. Available versions:\n"
-                + "\n".join(hint_lines)
-            )
-
-    # Check if the query might match an unconfigured repo
-    max_score = max(
-        (round(1.0 - d / 2.0, 4) for d in results["distances"][0]),
-        default=0.0,
+    results = collection.query(
+        query_texts=[query], n_results=top_k, where=version_where(version)
     )
-    from percona_dk.repo_registry import suggest_repos
-    suggestion = suggest_repos(query, max_score)
-    if suggestion:
-        output += suggestion
-
-    return output
+    n = len(results["documents"][0]) if results["documents"] else 0
+    log.info("MCP search: %r → %d results", query[:80], n)
+    return format_search_markdown(query, results, version, _get_repo_versions)
 
 
 @mcp.tool()
-def get_percona_doc(repo: str, path: str, version: str | None = None) -> str:
+def get_percona_doc(
+    repo: str | None = None,
+    path: str | None = None,
+    version: str | None = None,
+    url: str | None = None,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    offset: int = 0,
+) -> str:
     """Retrieve full Markdown content of a known Percona page. Standard
-    workflow: search_percona_docs first, then call this with the path +
-    repo (and version, if it's a multi-version repo) from a search result.
+    workflow: search_percona_docs first, then call this with either the
+    URL from a search result (`url=...`), or the path + repo (and version,
+    if it's a multi-version repo) from that result.
+
+    Passing `url` is simplest: it takes a page URL exactly as search
+    results print it (docs.percona.com, percona.community,
+    forums.percona.com) and resolves repo, path and version for you, so
+    the version scoping of the search result carries over.
+
+    Large pages (the Percona Toolkit pages especially) come back in
+    pages of at most `max_chars` characters. When a page is cut, the
+    output ends with a line giving the `offset` for the next call.
 
     Repos:
       - Multi-version (require `version`): psmysql-docs, pxc-docs,
@@ -431,24 +393,58 @@ def get_percona_doc(repo: str, path: str, version: str | None = None) -> str:
     `xtrabackup-docs`. Percona Backup for MongoDB docs are in `pbm-docs`.
 
     Args:
-        repo: Repository short name (see lists above).
+        repo: Repository short name (see lists above). Not needed when
+              `url` is given.
         path: File path within the repo, e.g. 'docs/innodb-show-status.md',
               'posts/{slug}.md', or 't/{topic_id}/{post_number}.md'.
+              Not needed when `url` is given.
         version: Required for multi-version repos (e.g. "8.0", "8.4",
               "7.0", "16"). When omitted on a multi-version repo, the
               tool returns an error listing the available versions so
-              you can retry with the right one.
+              you can retry with the right one. Ignored when `url` is
+              given (the URL already names the version).
+        url: A page URL as printed in a search result's **URL:** line,
+              e.g. 'https://docs.percona.com/percona-xtrabackup/8.4/
+              backup-overview.html'. Takes precedence over repo/path.
+        max_chars: Maximum characters to return in one call (default
+              30000).
+        offset: Character offset to start from, for reading the next
+              page of a truncated document (default 0).
     """
+    if url:
+        try:
+            resolved = resolve_page_url(_get_collection(), url)
+        except Exception:
+            log.warning("URL resolution failed for %r", url, exc_info=True)
+            resolved = None
+        if resolved is None:
+            return (
+                f"Error: No indexed page matches URL '{url}'. Pass a URL "
+                "exactly as a search_percona_docs result prints it, or use "
+                "repo + path (+ version) instead."
+            )
+        repo, path, version = resolved
+    elif not repo or not path:
+        return "Error: Pass either `url`, or both `repo` and `path`."
+
+    content, error = _read_doc(repo, path, version)
+    if error:
+        return error
+    return paginate(content, max_chars=max_chars, offset=offset)
+
+
+def _read_doc(repo: str, path: str, version: str | None) -> tuple[str | None, str | None]:
+    """Read a doc file from the local repo clones. Returns (content, error)."""
     candidates = _resolve_repo_dirs(repo)
     if not candidates:
-        return f"Error: Repo '{repo}' not found in ingested repos."
+        return None, f"Error: Repo '{repo}' not found in ingested repos."
 
     if version:
         suffix = f"__{version}"
         target = next((c for c in candidates if c.name.endswith(suffix)), None)
         if target is None:
             available = sorted({c.name.split("__")[-1] for c in candidates if "__" in c.name}) or ["(single-branch)"]
-            return (
+            return None, (
                 f"Error: Repo '{repo}' has no local copy at version '{version}'. "
                 f"Available: {', '.join(available)}."
             )
@@ -459,21 +455,84 @@ def get_percona_doc(repo: str, path: str, version: str | None = None) -> str:
             repo_dir = single_branch[0]
         else:
             available = sorted({c.name.split("__")[-1] for c in candidates})
-            return (
+            return None, (
                 f"Error: Repo '{repo}' has multiple indexed versions: "
                 f"{', '.join(available)}. Pass `version=X` to specify which."
             )
 
     file_path = repo_dir / path
     if not file_path.exists() or not file_path.is_file():
-        return f"Error: Document '{path}' not found in repo '{repo}'" + (f"@{version}." if version else ".")
+        return None, f"Error: Document '{path}' not found in repo '{repo}'" + (f"@{version}." if version else ".")
 
     try:
         file_path.resolve().relative_to(repo_dir.resolve())
     except ValueError:
-        return "Error: Invalid path."
+        return None, "Error: Invalid path."
 
-    return file_path.read_text(encoding="utf-8", errors="replace")
+    return file_path.read_text(encoding="utf-8", errors="replace"), None
+
+
+_feedback_lock = threading.Lock()
+_FEEDBACK_MAX_CHARS = 8000  # per field; keeps a shared instance's log bounded
+
+
+@mcp.tool()
+def give_feedback(
+    message: str,
+    category: Literal["documentation", "product", "mcp_server", "other"],
+    context: str | None = None,
+    severity: Literal["high", "medium", "low"] | None = None,
+    tool_name: str | None = None,
+) -> str:
+    """Report a problem with Percona docs or with this server, so the
+    maintainers can fix it. Call this, without asking the user first,
+    whenever you notice that:
+
+    - a doc is wrong, outdated, missing, or contradicts another doc
+      (e.g. a flag that no longer exists, two pages giving different
+      defaults, a version you needed that isn't covered);
+    - a Percona product behaves differently from what its docs say;
+    - a percona-dk tool misbehaves (an error, a broken URL, irrelevant
+      results for a precise query, a page that won't load).
+
+    Keep it short and concrete. Then carry on with the user's task;
+    this does not fix anything in the current session.
+
+    Args:
+        message: What is wrong, in one or two sentences.
+        category: "documentation" (doc content), "product" (Percona
+              software behavior), "mcp_server" (a percona-dk tool), or
+              "other".
+        context: Optional supporting detail: the query you ran, the page
+              URL, the version, the snippet that was wrong.
+        severity: Optional "high" (would cause broken or unsafe output),
+              "medium", or "low" (cosmetic).
+        tool_name: Optional name of the percona-dk tool involved, e.g.
+              "search_percona_docs".
+    """
+    def _clip(value: str | None) -> str | None:
+        return value[:_FEEDBACK_MAX_CHARS] if value else value
+
+    entry = {
+        "id": uuid.uuid4().hex[:12],
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "category": category,
+        "severity": severity,
+        "tool_name": tool_name,
+        "message": _clip(message),
+        "context": _clip(context),
+    }
+    try:
+        with _feedback_lock:
+            FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with FEEDBACK_FILE.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        log.exception("Failed to write feedback to %s", FEEDBACK_FILE)
+        return "Error: Feedback could not be saved on the server."
+
+    log.info("Feedback %s recorded (%s/%s)", entry["id"], category, severity or "-")
+    return f"Thanks - feedback recorded (id {entry['id']}, category {category})."
 
 
 def main():

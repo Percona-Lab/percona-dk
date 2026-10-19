@@ -13,8 +13,11 @@ from pathlib import Path
 
 import chromadb
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
+
+from percona_dk.shared import format_search_markdown, version_where
 
 # Find .env relative to repo root so the server works regardless of cwd.
 _pkg_dir = Path(__file__).resolve().parent.parent.parent
@@ -171,19 +174,10 @@ def search(req: SearchRequest):
     """Semantic search over Percona documentation. Returns top-k ranked chunks."""
     collection = _get_collection()
 
-    where = None
-    if req.version:
-        # Match the requested version, plus version-agnostic content (empty
-        # version) so single-branch repos and community content still surface.
-        where = {"$or": [
-            {"version": {"$eq": req.version}},
-            {"version": {"$eq": ""}},
-        ]}
-
     results = collection.query(
         query_texts=[req.query],
         n_results=req.top_k,
-        where=where,
+        where=version_where(req.version),
     )
 
     items: list[SearchResult] = []
@@ -239,6 +233,34 @@ def search(req: SearchRequest):
 
     suggestion = "\n\n".join(suggestion_parts) if suggestion_parts else None
     return SearchResponse(query=req.query, results=items, suggestion=suggestion)
+
+
+@app.get("/search", response_class=PlainTextResponse)
+def search_get(
+    q: str = Query(..., min_length=1, description="Search query"),
+    version: str | None = Query(
+        default=None,
+        description="Optional version filter (e.g. '8.0', '8.4', '7.0'), as for POST /search.",
+    ),
+    top_k: int = Query(default=5, description="Number of results (clamped to 1-20)."),
+):
+    """Semantic search as Markdown, for agents that can only send GET.
+
+    Returns the same text layout as the `search_percona_docs` MCP tool, so
+    an agent's web-fetch tool can search with no MCP connector configured:
+
+        GET /search?q=pxc+bootstrap+first+node&version=8.4&top_k=5
+    """
+    top_k = max(1, min(top_k, 20))
+    results = _get_collection().query(
+        query_texts=[q],
+        n_results=top_k,
+        where=version_where(version),
+    )
+    n = len(results["documents"][0]) if results["documents"] else 0
+    log.info("GET search: %r → %d results", q[:80], n)
+    body = format_search_markdown(q, results, version, _get_repo_versions)
+    return PlainTextResponse(body, media_type="text/markdown; charset=utf-8")
 
 
 def _resolve_repo_dirs(repo: str) -> list:
