@@ -5,6 +5,7 @@ Exposes search_percona_docs, get_percona_doc and give_feedback as MCP
 tools, consumable by Claude Desktop, Claude Code, Cursor, or any MCP client.
 """
 
+import json
 import os
 import logging
 import threading
@@ -241,6 +242,41 @@ def _get_repo_versions() -> dict[str, list[str]]:
         log.warning("Failed to compute repo->versions map", exc_info=True)
     _repo_versions_cache = {r: sorted(vs) for r, vs in out.items()}
     return _repo_versions_cache
+
+
+class _HeaderLogMiddleware:
+    """Pure ASGI middleware: log inbound MCP request headers as JSON.
+
+    Used on the shared SSE instance. Logs to journald via
+    `log.info("MCP headers: ...")` so journalctl-based analytics scripts
+    can attribute traffic to clients.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        try:
+            if scope.get("type") == "http":
+                path = scope.get("path", "")
+                if path.startswith("/sse") or path.startswith("/messages"):
+                    headers = {
+                        k.decode("latin-1"): v.decode("latin-1")
+                        for k, v in scope.get("headers", [])
+                    }
+                    client = scope.get("client")
+                    log.info(
+                        "MCP headers: %s",
+                        json.dumps({
+                            "path": path,
+                            "method": scope.get("method"),
+                            "client": f"{client[0]}:{client[1]}" if client else None,
+                            "headers": headers,
+                        }),
+                    )
+        except Exception:
+            pass  # never block real traffic on logging errors
+        await self.app(scope, receive, send)
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -546,6 +582,12 @@ def main():
 
     if args.transport == "stdio":
         mcp.run()
+    elif args.transport == "sse":
+        import uvicorn
+        from starlette.middleware import Middleware
+
+        app = mcp.http_app(transport="sse", middleware=[Middleware(_HeaderLogMiddleware)])
+        uvicorn.run(app, host=args.host, port=args.port)
     else:
         mcp.run(transport=args.transport, host=args.host, port=args.port)
 
