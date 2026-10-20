@@ -44,7 +44,7 @@ def test_search_respects_top_k():
 
 def test_document_retrieval():
     """GET /document/{repo}/{path} returns full Markdown content."""
-    resp = client.get("/document/psmysql-docs/docs/innodb-show-status.md")
+    resp = client.get("/document/psmysql-docs/docs/innodb-show-status.md?version=8.0")
     assert resp.status_code == 200
     data = resp.json()
     assert "content" in data
@@ -54,5 +54,5 @@ def test_document_retrieval():
 
 def test_document_not_found():
     """GET /document returns 404 for nonexistent paths."""
-    resp = client.get("/document/psmysql-docs/docs/nonexistent-page.md")
+    resp = client.get("/document/psmysql-docs/docs/nonexistent-page.md?version=8.0")
     assert resp.status_code == 404

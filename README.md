@@ -133,8 +133,34 @@ Percona doc repos (GitHub)
 ```
 
 - **Ingestion pipeline** - clones Percona doc repos, parses Markdown and reStructuredText sections, embeds locally (no API keys needed)
-- **REST API** - `POST /search`, `GET /document/{repo}/{path}`, `GET /health`, `GET /stats`
-- **MCP server** - `search_percona_docs` and `get_percona_doc` tools for any MCP-compatible client
+- **REST API** - `POST /search`, `GET /search` (Markdown, for agents), `GET /document/{repo}/{path}`, `GET /document?url=...`, `POST /feedback`, `GET /health`, `GET /stats`
+- **MCP server** - `search_percona_docs`, `get_percona_doc` and `give_feedback` tools for any MCP-compatible client (see [MCP tools](#mcp-tools))
+
+## MCP tools
+
+| Tool | What it does |
+|------|--------------|
+| `search_percona_docs(query, top_k=5, version=None)` | Semantic search. Returns ranked Markdown snippets, each with its repo, file path, version, section and page URL. Pass `version` (for example `"8.4"`) to scope results to one release; version-agnostic content (community, single-branch repos) still comes back. |
+| `get_percona_doc(repo=None, path=None, version=None, url=None, max_chars=30000, offset=0)` | Full Markdown of one page. Identify the page by `url` **or** by `repo` + `path` (+ `version` for multi-version repos). |
+| `give_feedback(message, category, context=None, severity=None, tool_name=None)` | Lets an agent report a doc or tool problem it ran into. |
+
+**Fetching a page by URL.** `get_percona_doc(url=...)` takes a page URL exactly as a search result prints it (`docs.percona.com`, `percona.community` or `forums.percona.com`) and resolves the repo, path and version from the index, so an 8.4 URL always returns the 8.4 file. Browser variants also resolve: `http://`, a `#anchor` or `?query`, the trailing-slash form instead of `.html`, and a forum topic link without the post number. `repo` / `path` / `version` keep working as before.
+
+**Paging large pages.** Some pages are very large (the Percona Toolkit pages run to 150k+ characters). `get_percona_doc` returns at most `max_chars` characters per call (default 30000), cut at a line break. A truncated page ends with a line like:
+
+```
+[Truncated: showing characters 0-29921 of 150077. To read the next page, call get_percona_doc again with the same arguments and offset=29921.]
+```
+
+Call again with that `offset` for the next page. Pass a larger `max_chars` to get more in one call.
+
+**Agent feedback.** `give_feedback` tells agents to report, without asking the user first, when a doc is wrong, missing, contradictory or outdated, when a product behaves differently from its docs, or when a percona-dk tool misbehaves. `category` is one of `documentation`, `product`, `mcp_server` or `other`; `severity` is optional (`high`, `medium`, `low`). The description also tells agents never to include secrets or private data (passwords, keys, tokens, hostnames, customer names, the user's own config). Each submission is appended as one JSON line, with a UTC timestamp and a short id, to `$DATA_DIR/feedback.jsonl` on the machine running the MCP server (for the remote shim, that is the shared instance). Nothing is sent anywhere else. Review it with:
+
+```bash
+tail -n 20 ~/percona-dk/data/feedback.jsonl | jq .
+```
+
+**Remote shim.** Internal users who connect through `percona-dk-mcp-remote` (a local stdio MCP that forwards to the shared instance's REST API, see `src/percona_dk/mcp_remote_shim.py`) get the same three tools with the same arguments: `get_percona_doc` calls `GET /document` (by URL or by repo and path, with `max_chars` and `offset`) and `give_feedback` calls `POST /feedback`. Off VPN, every tool returns a "VPN required" message instead of failing.
 
 ## Content sources
 
@@ -326,6 +352,49 @@ curl -X POST http://localhost:8000/search \
   -d '{"query": "How to configure PMM for MySQL monitoring", "top_k": 5}'
 ```
 
+### GET /search (for agents without a connector)
+
+An agent's web-fetch tool can usually only send GET, so `POST /search` is out of reach unless an MCP connector is configured. `GET /search` takes the same search as query parameters and returns `text/markdown` in exactly the layout `search_percona_docs` uses:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `q` | Search query (required) |
+| `version` | Optional version scope, for example `8.4` (same behavior as the MCP tool) |
+| `top_k` | Number of results, default 5, clamped to 1-20 |
+
+```bash
+curl 'http://localhost:8000/search?q=pxc+bootstrap+first+node&version=8.4&top_k=3'
+```
+
+An agent can then open any result's URL directly, or read the full page through `GET /document?url=...` with that URL, or through `GET /document/{repo}/{path}?version=X`, using the repo's short name (the part after `percona/`, for example `pxb-docs`) and the path the result prints.
+
+### GET /document
+
+Returns one page as JSON: `repo`, `version`, `path`, `content`, plus `offset` and `total_chars`. Identify the page either way:
+
+```bash
+# By the URL a search result prints; repo, path and version come from the index
+curl -G 'http://localhost:8000/document' \
+  --data-urlencode 'url=https://docs.percona.com/percona-xtrabackup/8.4/backup-overview.html'
+
+# By repo and path (version required for multi-version repos, else 409)
+curl 'http://localhost:8000/document/pxb-docs/docs/backup-overview.md?version=8.4'
+```
+
+Both forms take `max_chars` (default 30000) and `offset` and page large documents exactly like `get_percona_doc`: a cut page ends with a line giving the `offset` of the next one. An `offset` past the end returns 400; a URL that matches no indexed page returns 404.
+
+### POST /feedback
+
+Records a problem report in `$DATA_DIR/feedback.jsonl`, in the same format as the `give_feedback` tool. The body takes the same fields; `message` and `category` are required:
+
+```bash
+curl -X POST http://localhost:8000/feedback \
+  -H "Content-Type: application/json" \
+  -d '{"message": "innodb_log_file_size page is outdated for 8.4", "category": "documentation", "severity": "high"}'
+```
+
+The response is `{"id": "...", "category": "..."}`.
+
 ## How it works
 
 1. **Ingestion** (`percona-dk-ingest`): Shallow-clones each doc repo, walks all `.md` and `.rst` files, splits them at h2/h3 heading boundaries into chunks of ~500-800 tokens each. Metadata includes source repo, file path, heading hierarchy, and a constructed `docs.percona.com` URL.
@@ -344,6 +413,7 @@ percona-dk/
 │   ├── ingest.py          # Ingestion pipeline
 │   ├── server.py          # FastAPI REST server
 │   ├── mcp_server.py      # MCP server for AI tools
+│   ├── shared.py          # Search formatting, URL resolution, paging (used by both servers)
 │   ├── repo_registry.py   # Known repos + suggestion logic
 │   └── version_check.py   # Update notifications
 ├── install-percona-dk     # One-line installer

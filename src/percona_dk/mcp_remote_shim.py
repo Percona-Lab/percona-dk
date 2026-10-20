@@ -54,6 +54,13 @@ import os
 import requests
 from fastmcp import FastMCP
 
+from percona_dk.shared import (
+    DEFAULT_MAX_CHARS,
+    FeedbackCategory,
+    FeedbackSeverity,
+    paginate,
+)
+
 BACKEND_URL = os.getenv(
     "PERCONA_DK_BACKEND",
     "http://sherpa.tp.int.percona.com:8000",
@@ -83,6 +90,51 @@ _VPN_MESSAGE = (
 
 def _vpn_error_with_detail(detail: str) -> str:
     return f"{_VPN_MESSAGE}\n\n*Technical detail:* {detail}"
+
+
+def _http_error_message(resp: requests.Response | None) -> str:
+    """Message for a backend HTTP error. A FastAPI `detail` string (unknown
+    repo, missing version, bad offset...) reads like the local server's
+    own error; anything else shows the status and body."""
+    status = getattr(resp, "status_code", "?")
+    try:
+        detail = resp.json().get("detail")
+    except Exception:
+        detail = None
+    if isinstance(detail, str):
+        return f"Error: {detail}"
+    body = ""
+    try:
+        body = resp.text[:500]
+    except Exception:
+        pass
+    return (
+        f"Percona DK backend returned HTTP {status}.\n\n"
+        f"Backend: `{BACKEND_URL}`\n\n*Body:* {body}"
+    )
+
+
+def _call_backend(method: str, endpoint: str, **kwargs) -> tuple[dict | None, str | None]:
+    """Call the REST backend. Returns (json, None), or (None, message) with
+    a message the tool can hand straight back to the agent."""
+    try:
+        resp = requests.request(
+            method, f"{BACKEND_URL}{endpoint}", timeout=REQUEST_TIMEOUT, **kwargs
+        )
+        resp.raise_for_status()
+        return resp.json(), None
+    except requests.ConnectionError as e:
+        log.warning("Backend unreachable: %s", e)
+        return None, _vpn_error_with_detail(f"connection error reaching {BACKEND_URL}")
+    except requests.Timeout:
+        return None, _vpn_error_with_detail(
+            f"request timed out after {REQUEST_TIMEOUT}s"
+        )
+    except requests.HTTPError as e:
+        return None, _http_error_message(e.response)
+    except Exception as e:
+        log.exception("Unexpected error calling %s %s", method, endpoint)
+        return None, f"Unexpected error calling Percona DK: {type(e).__name__}: {e}"
 
 
 def _format_search_results(data: dict) -> str:
@@ -167,121 +219,169 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
                strings ("WSREP: Failed to open backend connection"),
                product names, configuration flags, or full questions.
         top_k: Number of results to return (1-20, default 5).
-        version: Optional product version to scope results to. Indexed:
-                 PS / PXC / PXB / PDMySQL on "8.0" and "8.4"; PSMDB on
-                 "6.0", "7.0", "8.0"; PostgreSQL on "16" and "17".
-                 Operator docs (k8s*), PMM, PBM, Toolkit, Valkey,
-                 pg_tde, pgsm, everest, etc. are single-branch and
-                 ignore this arg. NOT indexed: PXB 2.4 / PS 5.7 (EOL),
-                 MongoDB 5.0, PXB 9.x (~0.05% of deployed instances).
-                 Pass this when a query mentions a specific version
-                 (e.g. "PXB 8.0.35 release notes" -> version="8.0").
+        version: Optional product version to scope results to. Indexed
+                 versions:
+                   - PS / PXC / PXB / PDMySQL: "8.0", "8.4"
+                   - PSMDB: "6.0", "7.0", "8.0"
+                   - PostgreSQL distribution: "16", "17"
+                 Operator docs (k8sps/k8spxc/k8spsmdb/k8spg), PMM, PBM,
+                 Toolkit, Valkey, pg_tde, pgsm, everest, etc. are
+                 single-branch and ignore the version arg.
+
+                 NOT indexed: PXB 2.4 (EOL), PS 5.7 (EOL), MongoDB 5.0,
+                 PXB 9.x (~0.05% of deployed instances per telemetry).
+
+                 When provided, only chunks tagged with that version -
+                 plus version-agnostic content (community blog/forum,
+                 single-branch repos) - are returned. If a query
+                 mentions a specific version (e.g. "PXB 8.0.35 release
+                 notes"), pass version="8.0" so retrieval is scoped to
+                 the right release branch.
     """
     top_k = max(1, min(int(top_k), 20))
     payload: dict = {"query": query, "top_k": top_k}
     if version:
         payload["version"] = version
-    try:
-        resp = requests.post(
-            f"{BACKEND_URL}/search",
-            json=payload,
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return _format_search_results(resp.json())
-    except requests.ConnectionError as e:
-        log.warning("Backend unreachable: %s", e)
-        return _vpn_error_with_detail(f"connection error reaching {BACKEND_URL}")
-    except requests.Timeout:
-        return _vpn_error_with_detail(
-            f"request timed out after {REQUEST_TIMEOUT}s"
-        )
-    except requests.HTTPError as e:
-        status = getattr(e.response, "status_code", "?")
-        body = ""
-        try:
-            body = e.response.text[:500]
-        except Exception:
-            pass
-        return (
-            f"Percona DK backend returned HTTP {status}.\n\n"
-            f"Backend: `{BACKEND_URL}`\n\n*Body:* {body}"
-        )
-    except Exception as e:
-        log.exception("Unexpected error in search_percona_docs")
-        return f"Unexpected error calling Percona DK: {type(e).__name__}: {e}"
+    data, error = _call_backend("POST", "/search", json=payload)
+    if error:
+        return error
+    return _format_search_results(data)
 
 
 @mcp.tool()
-def get_percona_doc(repo: str, path: str, version: str | None = None) -> str:
-    """Retrieve the full content of a specific Percona doc, blog post,
-    or forum thread.
+def get_percona_doc(
+    repo: str | None = None,
+    path: str | None = None,
+    version: str | None = None,
+    url: str | None = None,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    offset: int = 0,
+) -> str:
+    """Retrieve full Markdown content of a known Percona page. Standard
+    workflow: search_percona_docs first, then call this with either the
+    URL from a search result (`url=...`), or the path + repo (and version,
+    if it's a multi-version repo) from that result.
 
-    Use this when you already know which page you want (e.g. from a
-    previous search result) and need the complete content.
+    Passing `url` is simplest: it takes a page URL exactly as search
+    results print it (docs.percona.com, percona.community,
+    forums.percona.com) and resolves repo, path and version for you, so
+    the version scoping of the search result carries over.
+
+    Large pages (the Percona Toolkit pages especially) come back in
+    pages of at most `max_chars` characters. When a page is cut, the
+    output ends with a line giving the `offset` for the next call.
+
+    Repos:
+      - Multi-version (require `version`): psmysql-docs, pxc-docs,
+        pxb-docs, pdmysql-docs, psmdb-docs, postgresql-docs.
+      - Single-branch (ignore `version`): pmm-doc, pbm-docs, k8sps-docs,
+        k8spxc-docs, k8spsmdb-docs, k8spg-docs, percona-toolkit, pg_tde,
+        pgsm-docs, pcsm-docs, percona-valkey-doc, ps-binlog-server-docs,
+        proxysql-admin-tool-doc, pmm_dump_docs, repo-config-docs,
+        everest-doc.
+      - Community: percona-community-blog (blog), percona-forums (paths
+        like 't/12345/1.md').
 
     Note: Percona XtraBackup docs are in `pxb-docs`, NOT a repo named
     `xtrabackup-docs`. Percona Backup for MongoDB docs are in `pbm-docs`.
 
     Args:
-        repo: Repository short name. Multi-version repos (require
-              `version`): psmysql-docs, pxc-docs, pxb-docs,
-              pdmysql-docs, psmdb-docs, postgresql-docs. Single-branch:
-              pmm-doc, pbm-docs, k8sps-docs, k8spxc-docs, k8spsmdb-docs,
-              k8spg-docs, percona-toolkit, pg_tde, pgsm-docs, pcsm-docs,
-              percona-valkey-doc, ps-binlog-server-docs,
-              proxysql-admin-tool-doc, pmm_dump_docs, repo-config-docs,
-              everest-doc. Community: percona-community-blog,
-              percona-forums.
-        path: File path within the repo, e.g. 'docs/installation.md',
+        repo: Repository short name (see lists above). Not needed when
+              `url` is given.
+        path: File path within the repo, e.g. 'docs/innodb-show-status.md',
               'posts/{slug}.md', or 't/{topic_id}/{post_number}.md'.
+              Not needed when `url` is given.
         version: Required for multi-version repos (e.g. "8.0", "8.4",
-              "7.0", "16"). Omit for single-branch repos. If you call a
-              multi-version repo without this, the response lists the
-              available versions so you can retry.
+              "7.0", "16"). When omitted on a multi-version repo, the
+              tool returns an error listing the available versions so
+              you can retry with the right one. Ignored when `url` is
+              given (the URL already names the version).
+        url: A page URL as printed in a search result's **URL:** line,
+              e.g. 'https://docs.percona.com/percona-xtrabackup/8.4/
+              backup-overview.html'. Takes precedence over repo/path.
+        max_chars: Maximum characters to return in one call (default
+              30000).
+        offset: Character offset to start from, for reading the next
+              page of a truncated document (default 0).
     """
-    params = {}
-    if version:
-        params["version"] = version
-    # The REST endpoint uses path-segment routing for {repo}, so a literal
-    # slash (e.g. "percona/pxb-docs") would be parsed as two segments and
-    # break. Send only the last path component; the backend resolver
-    # accepts either form.
-    repo_segment = repo.rsplit("/", 1)[-1]
-    try:
-        resp = requests.get(
-            f"{BACKEND_URL}/document/{repo_segment}/{path}",
-            params=params,
-            timeout=REQUEST_TIMEOUT,
+    paging = {"max_chars": max_chars, "offset": offset}
+    if url:
+        data, error = _call_backend("GET", "/document", params={"url": url, **paging})
+    elif not repo or not path:
+        return "Error: Pass either `url`, or both `repo` and `path`."
+    else:
+        params = dict(paging)
+        if version:
+            params["version"] = version
+        # The REST endpoint uses path-segment routing for {repo}, so a literal
+        # slash (e.g. "percona/pxb-docs") would be parsed as two segments and
+        # break. Send only the last path component; the backend resolver
+        # accepts either form.
+        repo_segment = repo.rsplit("/", 1)[-1]
+        data, error = _call_backend(
+            "GET", f"/document/{repo_segment}/{path}", params=params
         )
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict) and "content" in data:
-            return data["content"]
-        return str(data)
-    except requests.ConnectionError as e:
-        log.warning("Backend unreachable: %s", e)
-        return _vpn_error_with_detail(f"connection error reaching {BACKEND_URL}")
-    except requests.Timeout:
-        return _vpn_error_with_detail(
-            f"request timed out after {REQUEST_TIMEOUT}s"
-        )
-    except requests.HTTPError as e:
-        status = getattr(e.response, "status_code", "?")
-        if status == 404:
-            return f"Document not found: `{repo}/{path}`"
-        body = ""
-        try:
-            body = e.response.text[:500]
-        except Exception:
-            pass
-        return (
-            f"Percona DK backend returned HTTP {status}.\n\n"
-            f"Backend: `{BACKEND_URL}`\n\n*Body:* {body}"
-        )
-    except Exception as e:
-        log.exception("Unexpected error in get_percona_doc")
-        return f"Unexpected error calling Percona DK: {type(e).__name__}: {e}"
+    if error:
+        return error
+    content = data.get("content", "")
+    if "total_chars" not in data:
+        # Backend predates paging and sent the whole page; page it here.
+        return paginate(content, max_chars=max_chars, offset=offset)
+    return content
+
+
+@mcp.tool()
+def give_feedback(
+    message: str,
+    category: FeedbackCategory,
+    context: str | None = None,
+    severity: FeedbackSeverity | None = None,
+    tool_name: str | None = None,
+) -> str:
+    """Report a problem with Percona docs or with this server, so the
+    maintainers can fix it. Call this, without asking the user first,
+    whenever you notice that:
+
+    - a doc is wrong, outdated, missing, or contradicts another doc
+      (e.g. a flag that no longer exists, two pages giving different
+      defaults, a version you needed that isn't covered);
+    - a Percona product behaves differently from what its docs say;
+    - a percona-dk tool misbehaves (an error, a broken URL, irrelevant
+      results for a precise query, a page that won't load).
+
+    Keep it short and concrete. Then carry on with the user's task;
+    this does not fix anything in the current session.
+
+    Never include secrets or private data: no passwords, API keys,
+    tokens, connection strings, hostnames or IPs, customer names, or
+    the user's own config and data. Feedback is stored in plain text
+    and may be read by whoever runs this server. Describe the doc
+    problem, quoting only the Percona doc text, query or URL involved.
+
+    Args:
+        message: What is wrong, in one or two sentences.
+        category: "documentation" (doc content), "product" (Percona
+              software behavior), "mcp_server" (a percona-dk tool), or
+              "other".
+        context: Optional supporting detail: the query you ran, the page
+              URL, the version, the doc snippet that was wrong. Redact
+              anything from the user's environment.
+        severity: Optional "high" (would cause broken or unsafe output),
+              "medium", or "low" (cosmetic).
+        tool_name: Optional name of the percona-dk tool involved, e.g.
+              "search_percona_docs".
+    """
+    payload = {
+        "message": message,
+        "category": category,
+        "context": context,
+        "severity": severity,
+        "tool_name": tool_name,
+    }
+    data, error = _call_backend("POST", "/feedback", json=payload)
+    if error:
+        return error
+    return f"Thanks - feedback recorded (id {data['id']}, category {category})."
 
 
 def main():
