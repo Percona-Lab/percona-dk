@@ -35,7 +35,9 @@ if [ ! -d "$VENV" ]; then
     $PYTHON -m venv "$VENV"
 fi
 "$VENV/bin/pip" install --quiet --upgrade pip
-"$VENV/bin/pip" install --quiet .
+# -c constraints.txt keeps a redeploy from silently upgrading a dependency under
+# a working server; see the header of that file for how to move a pin forward.
+"$VENV/bin/pip" install --quiet -c "$INSTALL_DIR/constraints.txt" .
 echo "  Installed."
 
 # ---- 2. Ensure .env exists ----
