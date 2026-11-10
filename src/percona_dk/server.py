@@ -7,7 +7,6 @@ over the ingested Percona documentation corpus.
 
 import logging
 import os
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
+from percona_dk.index_store import LiveIndex
 from percona_dk.shared import (
     DEFAULT_MAX_CHARS,
     FeedbackCategory,
@@ -52,7 +52,6 @@ _raw_data = os.getenv("DATA_DIR", "data")
 _data_path = Path(_raw_data)
 DATA_DIR = (_env_dir / _data_path).resolve() if not _data_path.is_absolute() else _data_path.resolve()
 REPOS_DIR = DATA_DIR / "repos"
-CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
 FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"
 
@@ -67,72 +66,44 @@ app = FastAPI(
 
 _startup_time = datetime.now(timezone.utc)
 
-# Module-level cache for the chroma client and collection. Without this the
-# DefaultEmbeddingFunction reloads the ~80 MB MiniLM ONNX model and the HNSW
-# index reloads from disk on EVERY request, costing ~1-2s per query.
-# Caching cuts steady-state latency to ~50-100ms. The systemd ingest unit
-# restarts this service on completion, so cache invalidation is automatic.
-_collection: chromadb.Collection | None = None
-_collection_lock = threading.Lock()
+# The open collection, kept for the life of the process: reopening per
+# request would reload the ~80 MB MiniLM ONNX model and the HNSW index
+# (~1-2s per query instead of ~50-100ms). When ingest publishes a new index
+# generation, LiveIndex opens and warms it in the background and switches
+# to it in-process (see index_store.py), so no restart is needed.
+_index = LiveIndex(DATA_DIR, COLLECTION_NAME)
 
 
 def _get_collection() -> chromadb.Collection:
-    global _collection
-    if _collection is not None:
-        return _collection
-    with _collection_lock:
-        if _collection is None:
-            client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-            _collection = client.get_collection(COLLECTION_NAME)
-    return _collection
+    return _index.collection()
+
+
+def _get_repo_versions() -> dict[str, list[str]]:
+    """Return {source_repo: sorted distinct versions} excluding empty values.
+
+    Read from the generation's index_meta.json, written by ingest.
+    """
+    return _index.repo_versions()
 
 
 def _warmup() -> None:
     """Pre-load the collection + embedding model so the first user query is fast."""
     try:
         col = _get_collection()
-        col.query(query_texts=["warmup"], n_results=1)
-        log.info("Collection warmed (%d chunks)", col.count())
-        _get_repo_versions()
+        log.info("Collection warmed (%d chunks, generation %s)", col.count(), _index.generation)
     except Exception:
         log.warning("Warmup failed; will retry on first request", exc_info=True)
-
-
-_repo_versions_cache: dict[str, list[str]] | None = None
-
-
-def _get_repo_versions() -> dict[str, list[str]]:
-    """Return {source_repo: sorted distinct versions} excluding empty values.
-
-    Cached at module level. Built lazily by paginating chroma metadata.
-    """
-    global _repo_versions_cache
-    if _repo_versions_cache is not None:
-        return _repo_versions_cache
-    out: dict[str, set[str]] = {}
-    try:
-        col = _get_collection()
-        offset = 0
-        batch = 5000
-        while True:
-            res = col.get(include=["metadatas"], limit=batch, offset=offset)
-            metas = res.get("metadatas") or []
-            if not metas:
-                break
-            for m in metas:
-                v = (m.get("version") or "").strip()
-                if v:
-                    out.setdefault(m["source_repo"], set()).add(v)
-            offset += batch
-    except Exception:
-        log.warning("Failed to compute repo->versions map", exc_info=True)
-    _repo_versions_cache = {r: sorted(vs) for r, vs in out.items()}
-    return _repo_versions_cache
 
 
 @app.on_event("startup")
 def _on_startup() -> None:
     _warmup()
+    _index.start_watcher()
+
+
+@app.on_event("shutdown")
+def _on_shutdown() -> None:
+    _index.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +157,7 @@ class HealthResponse(BaseModel):
     status: str
     doc_count: int
     uptime_seconds: float
+    index_generation: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +432,7 @@ def health():
         status="ok",
         doc_count=doc_count,
         uptime_seconds=round(uptime, 1),
+        index_generation=_index.generation,
     )
 
 
@@ -480,13 +453,9 @@ def stats():
     except Exception:
         return {"total_chunks": 0, "repos": {}}
 
-    # Sample all docs to count per-repo (ChromaDB doesn't support GROUP BY)
-    # Use get with limit to pull all metadata
-    all_meta = collection.get(include=["metadatas"])
-    repo_counts: dict[str, int] = {}
-    for meta in all_meta["metadatas"]:
-        repo = meta.get("source_repo", "unknown")
-        repo_counts[repo] = repo_counts.get(repo, 0) + 1
+    # Per-repo counts come from index_meta.json (ChromaDB has no GROUP BY;
+    # LiveIndex scans metadata once for an index built without it).
+    repo_counts: dict[str, int] = _index.meta().get("chunks_per_repo") or {}
 
     # Check which repos are cloned locally
     ingested_repos: list[str] = []
