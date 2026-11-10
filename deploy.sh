@@ -94,11 +94,11 @@ mkdir -p "$INSTALL_DIR/data"
 
 # Daily ingestion service + timer
 #
-# ExecStartPost restarts the REST API and MCP server so they reload their
-# in-memory ChromaDB HNSW index and see newly-ingested chunks. Without this,
-# those long-running services keep serving from a stale index even though
-# the underlying SQLite already has the new data. "try-restart" is a no-op
-# if the service isn't running.
+# Ingest builds a new index generation under data/index/ and switches the
+# CURRENT pointer only when it succeeds. The REST API and MCP server notice
+# the new generation within INDEX_CHECK_SECONDS (default 30) and switch to
+# it in-process, so no restart is needed after ingest (there used to be an
+# ExecStartPost restart here, which cost ~50s of downtime a day).
 cat > "$SYSTEMD_DIR/percona-dk-ingest.service" <<EOF
 [Unit]
 Description=Percona DK daily doc ingestion
@@ -110,7 +110,6 @@ WorkingDirectory=$INSTALL_DIR
 Environment=DOTENV_PATH=$INSTALL_DIR/.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV/bin/python -m percona_dk.ingest
-ExecStartPost=/usr/bin/systemctl --user try-restart percona-dk-api.service percona-dk-mcp.service
 StandardOutput=append:$INSTALL_DIR/data/ingest.log
 StandardError=append:$INSTALL_DIR/data/ingest.log
 EOF
@@ -139,10 +138,11 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# Enable and start
+# Enable and (re)start. A re-deploy restarts the servers so they run the
+# code just installed.
 systemctl --user daemon-reload
-systemctl --user enable --now percona-dk-mcp.service
-systemctl --user enable --now percona-dk-api.service
+systemctl --user enable percona-dk-mcp.service percona-dk-api.service
+systemctl --user restart percona-dk-mcp.service percona-dk-api.service
 systemctl --user enable --now percona-dk-ingest.timer
 
 # Alert service is pulled in by OnFailure= — no enable needed, but warn if
@@ -176,6 +176,7 @@ echo ""
 echo "  Logs:        journalctl --user -u percona-dk-mcp -f"
 echo "  Status:      systemctl --user status percona-dk-mcp percona-dk-api"
 echo "  Re-ingest:   systemctl --user start percona-dk-ingest"
+echo "  Index:       $VENV/bin/percona-dk-ingest --status   (--rollback to switch back)"
 echo ""
 echo "--- MCP Client Config (Claude Desktop / Code / Cursor) ---"
 echo ""

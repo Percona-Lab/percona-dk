@@ -18,6 +18,7 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from percona_dk.index_store import LiveIndex, current_chroma_dir
 from percona_dk.shared import (
     DEFAULT_MAX_CHARS,
     FeedbackCategory,
@@ -56,7 +57,6 @@ _data_path = Path(_raw_data)
 # so the server works after `pip install .` (where __file__ is in site-packages).
 DATA_DIR = (_env_dir / _data_path).resolve() if not _data_path.is_absolute() else _data_path.resolve()
 REPOS_DIR = DATA_DIR / "repos"
-CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
 REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "7"))  # auto-refresh if older than N days
 LAST_INGEST_FILE = DATA_DIR / ".last_ingest"
@@ -73,10 +73,11 @@ def _days_since_last_ingest() -> float | None:
     """Return days since last ingestion, or None if never ingested."""
     if not LAST_INGEST_FILE.exists():
         # Fall back to checking if chroma dir exists and has data
-        if not CHROMA_DIR.exists():
+        chroma_dir = current_chroma_dir(DATA_DIR)
+        if not chroma_dir.exists():
             return None
         # Use chroma dir mtime as proxy
-        mtime = CHROMA_DIR.stat().st_mtime
+        mtime = chroma_dir.stat().st_mtime
     else:
         mtime = LAST_INGEST_FILE.stat().st_mtime
     return (time.time() - mtime) / 86400
@@ -153,39 +154,26 @@ mcp = FastMCP(
 )
 
 
-# Module-level cache for the chroma client and collection. Without this the
-# DefaultEmbeddingFunction reloads the ~80 MB MiniLM ONNX model and the HNSW
-# index reloads from disk on EVERY request, costing ~1-2s per query.
-# Caching cuts steady-state latency to ~50-100ms. The systemd ingest unit
-# restarts this service on completion, so cache invalidation is automatic.
-_collection: chromadb.Collection | None = None
-_collection_lock = threading.Lock()
+# The open collection, kept for the life of the process: reopening per
+# request would reload the ~80 MB MiniLM ONNX model and the HNSW index
+# (~1-2s per query instead of ~50-100ms). When ingest publishes a new index
+# generation (the daily run, or the auto-refresh below), LiveIndex opens and
+# warms it in the background and switches to it in-process (see
+# index_store.py), so no restart is needed.
+_index = LiveIndex(DATA_DIR, COLLECTION_NAME)
 
 
 def _get_collection() -> chromadb.Collection:
-    global _collection
-    if _collection is not None:
-        return _collection
-    with _collection_lock:
-        if _collection is None:
-            client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-            _collection = client.get_collection(COLLECTION_NAME)
-    return _collection
+    return _index.collection()
 
 
 def _warmup() -> None:
     """Pre-load the collection + embedding model so the first user query is fast."""
     try:
         col = _get_collection()
-        col.query(query_texts=["warmup"], n_results=1)
-        log.info("Collection warmed (%d chunks)", col.count())
-        # Also pre-build the repo->versions map so version hints are free.
-        _get_repo_versions()
+        log.info("Collection warmed (%d chunks, generation %s)", col.count(), _index.generation)
     except Exception:
         log.warning("Warmup failed; will retry on first request", exc_info=True)
-
-
-_repo_versions_cache: dict[str, list[str]] | None = None
 
 
 def _resolve_repo_dirs(repo: str) -> list:
@@ -218,30 +206,9 @@ def _resolve_repo_dirs(repo: str) -> list:
 def _get_repo_versions() -> dict[str, list[str]]:
     """Return {source_repo: sorted list of distinct versions} excluding empty.
 
-    Cached at module level. Built lazily by paginating through chroma metadata.
+    Read from the generation's index_meta.json, written by ingest.
     """
-    global _repo_versions_cache
-    if _repo_versions_cache is not None:
-        return _repo_versions_cache
-    out: dict[str, set[str]] = {}
-    try:
-        col = _get_collection()
-        offset = 0
-        batch = 5000
-        while True:
-            res = col.get(include=["metadatas"], limit=batch, offset=offset)
-            metas = res.get("metadatas") or []
-            if not metas:
-                break
-            for m in metas:
-                v = (m.get("version") or "").strip()
-                if v:
-                    out.setdefault(m["source_repo"], set()).add(v)
-            offset += batch
-    except Exception:
-        log.warning("Failed to compute repo->versions map", exc_info=True)
-    _repo_versions_cache = {r: sorted(vs) for r, vs in out.items()}
-    return _repo_versions_cache
+    return _index.repo_versions()
 
 
 class _HeaderLogMiddleware:
@@ -292,6 +259,7 @@ async def health(_request: Request) -> JSONResponse:
         "status": status,
         "doc_count": doc_count,
         "uptime_seconds": round(time.time() - _startup_time, 1),
+        "index_generation": _index.generation,
     })
 
 
@@ -579,6 +547,7 @@ def main():
     print_version_notice()
     _maybe_refresh()
     _warmup()
+    _index.start_watcher()
 
     if args.transport == "stdio":
         mcp.run()
