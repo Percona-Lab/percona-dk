@@ -162,6 +162,35 @@ tail -n 20 ~/percona-dk/data/feedback.jsonl | jq .
 
 **Remote shim.** Internal users who connect through `percona-dk-mcp-remote` (a local stdio MCP that forwards to the shared instance's REST API, see `src/percona_dk/mcp_remote_shim.py`) get the same three tools with the same arguments: `get_percona_doc` calls `GET /document` (by URL or by repo and path, with `max_chars` and `offset`) and `give_feedback` calls `POST /feedback`. Off VPN, every tool returns a "VPN required" message instead of failing.
 
+### Pointing the remote shim at another instance
+
+The shim reads its backend from the `PERCONA_DK_BACKEND` environment variable: the base URL of a percona-dk REST API (the `api` service, not the MCP `/mcp` URL). The default is still the current shared instance, `http://sherpa.tp.int.percona.com:8000`, and will change once the new VPN-hosted instance has its final hostname. To try another instance before then, set the variable in your MCP client config. It is read from the client's `env` block, not from `.env`.
+
+Claude Desktop (or any client with a JSON config):
+
+```json
+{
+  "mcpServers": {
+    "percona-dk": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/Percona-Lab/percona-dk", "percona-dk-mcp-remote"],
+      "env": { "PERCONA_DK_BACKEND": "https://percona-dk.example.internal" }
+    }
+  }
+}
+```
+
+If you installed with the installer, keep its `command` and `args` and add `PERCONA_DK_BACKEND` to the existing `env` block.
+
+Claude Code:
+
+```bash
+claude mcp add --env PERCONA_DK_BACKEND=https://percona-dk.example.internal percona-dk -- \
+  uvx --from git+https://github.com/Percona-Lab/percona-dk percona-dk-mcp-remote
+```
+
+A path prefix works too (for example `https://host.example.internal/percona-dk-api`); the shim appends `/search`, `/document` and `/feedback` to whatever you set. Trailing slashes are stripped. `PERCONA_DK_TIMEOUT` (seconds, default 15) sets the per-request timeout. Restart the MCP client after changing either.
+
 ## Content sources
 
 percona-dk indexes three kinds of content into a single searchable corpus:
@@ -320,6 +349,10 @@ Use cases this unlocks:
 
 If you just want the default single-user experience, stick with the stdio install from the Quick Start -- no flags needed.
 
+## Run in containers
+
+A Docker image (`ghcr.io/percona-lab/percona-dk`), a `docker-compose.yml` with `api`, `mcp` and a scheduled `ingest` service, and a runbook for hosting the shared instance are in [DEPLOY.md](DEPLOY.md). Both servers' `/health` include `last_ingest` and `index_age_hours` for stale-index alerting.
+
 ## Keeping docs up to date
 
 The MCP server **automatically syncs** docs in the background. On each startup, it checks when the last sync ran. If it's been more than 7 days (configurable), it pulls the latest from GitHub and re-embeds only the files that changed - all in the background so the server starts immediately. Existing data stays searchable during the sync.
@@ -417,6 +450,8 @@ percona-dk/
 │   ├── repo_registry.py   # Known repos + suggestion logic
 │   └── version_check.py   # Update notifications
 ├── install-percona-dk     # One-line installer
+├── Dockerfile             # One image for ingest, REST API and MCP
+├── docker-compose.yml     # Shared-instance deployment (see DEPLOY.md)
 ├── pyproject.toml
 └── .env.example
 ```

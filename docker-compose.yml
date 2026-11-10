@@ -1,0 +1,65 @@
+# percona-dk behind the VPN. See DEPLOY.md for the full runbook.
+#
+#   docker compose pull
+#   docker compose run --rm ingest     # first ingest (or restore a data copy)
+#   docker compose up -d               # api + mcp
+#
+# Daily refresh at 03:00 UTC (host cron or systemd timer, see DEPLOY.md):
+#   docker compose run --rm ingest && docker compose restart api mcp
+
+x-common: &common
+  image: ${PERCONA_DK_IMAGE:-ghcr.io/percona-lab/percona-dk:latest}
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DATA_DIR: /data
+  volumes:
+    - percona-dk-data:/data
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  api:
+    <<: *common
+    command: ["python", "-m", "percona_dk.server"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  mcp:
+    <<: *common
+    command: ["python", "-m", "percona_dk.mcp_server", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8402"]
+    environment:
+      DATA_DIR: /data
+      # Ingest runs as its own scheduled job; don't also re-ingest inside
+      # the MCP server on startup.
+      REFRESH_DAYS: "0"
+    ports:
+      - "${MCP_PORT:-8402}:8402"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8402/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  # One-shot job, not started by `docker compose up`. Trigger it with
+  # `docker compose run --rm ingest` from a daily host cron/systemd timer.
+  ingest:
+    <<: *common
+    command: ["python", "-m", "percona_dk.ingest"]
+    profiles: ["ingest"]
+    restart: "no"
+
+volumes:
+  percona-dk-data:
