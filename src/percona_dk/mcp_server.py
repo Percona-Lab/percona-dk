@@ -23,8 +23,11 @@ from percona_dk.shared import (
     FeedbackCategory,
     FeedbackSeverity,
     append_feedback,
+    LAST_INGEST_MARKER,
     format_search_markdown,
+    index_freshness,
     paginate,
+    redact_headers,
     resolve_page_url,
     version_where,
 )
@@ -59,7 +62,7 @@ REPOS_DIR = DATA_DIR / "repos"
 CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
 REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "7"))  # auto-refresh if older than N days
-LAST_INGEST_FILE = DATA_DIR / ".last_ingest"
+LAST_INGEST_FILE = DATA_DIR / LAST_INGEST_MARKER
 FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"
 
 _startup_time = time.time()
@@ -97,6 +100,11 @@ def _background_refresh():
 
 def _maybe_refresh():
     """Check if data is stale and kick off background refresh if needed."""
+    if REFRESH_DAYS <= 0:
+        # Documented as "0 disables auto-refresh". The container deployment
+        # relies on this: ingest runs as its own scheduled job there.
+        log.info("Auto-refresh disabled (REFRESH_DAYS=%d)", REFRESH_DAYS)
+        return
     days = _days_since_last_ingest()
     if days is None:
         log.info("No ingested data found — run 'percona-dk-ingest' first")
@@ -244,12 +252,19 @@ def _get_repo_versions() -> dict[str, list[str]]:
     return _repo_versions_cache
 
 
+# Paths whose request headers are logged: SSE (/sse, /messages) and
+# streamable-http (/mcp). /health is left out so monitoring probes don't
+# flood the log.
+_LOGGED_PATH_PREFIXES = ("/sse", "/messages", "/mcp")
+
+
 class _HeaderLogMiddleware:
     """Pure ASGI middleware: log inbound MCP request headers as JSON.
 
-    Used on the shared SSE instance. Logs to journald via
-    `log.info("MCP headers: ...")` so journalctl-based analytics scripts
-    can attribute traffic to clients.
+    Used on both HTTP transports. Logs via `log.info("MCP headers: ...")`
+    so journalctl/docker-logs analytics can attribute traffic to clients.
+    Credential-bearing headers are redacted first (see
+    shared.redact_headers).
     """
 
     def __init__(self, app):
@@ -259,11 +274,11 @@ class _HeaderLogMiddleware:
         try:
             if scope.get("type") == "http":
                 path = scope.get("path", "")
-                if path.startswith("/sse") or path.startswith("/messages"):
-                    headers = {
+                if path.startswith(_LOGGED_PATH_PREFIXES):
+                    headers = redact_headers({
                         k.decode("latin-1"): v.decode("latin-1")
                         for k, v in scope.get("headers", [])
-                    }
+                    })
                     client = scope.get("client")
                     log.info(
                         "MCP headers: %s",
@@ -279,9 +294,20 @@ class _HeaderLogMiddleware:
         await self.app(scope, receive, send)
 
 
+def build_http_app(transport: str):
+    """ASGI app for an HTTP transport ("sse" or "streamable-http") with header logging."""
+    from starlette.middleware import Middleware
+
+    return mcp.http_app(transport=transport, middleware=[Middleware(_HeaderLogMiddleware)])
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_request: Request) -> JSONResponse:
-    """Lightweight health check for monitoring (returns doc count + uptime)."""
+    """Health check for monitoring: doc count, uptime and index freshness.
+
+    `last_ingest` / `index_age_hours` come from the same .last_ingest
+    marker the auto-refresh reads, so monitoring can alert on a stale index.
+    """
     try:
         doc_count = _get_collection().count()
         status = "ok"
@@ -292,6 +318,7 @@ async def health(_request: Request) -> JSONResponse:
         "status": status,
         "doc_count": doc_count,
         "uptime_seconds": round(time.time() - _startup_time, 1),
+        **index_freshness(DATA_DIR),
     })
 
 
@@ -582,14 +609,10 @@ def main():
 
     if args.transport == "stdio":
         mcp.run()
-    elif args.transport == "sse":
-        import uvicorn
-        from starlette.middleware import Middleware
-
-        app = mcp.http_app(transport="sse", middleware=[Middleware(_HeaderLogMiddleware)])
-        uvicorn.run(app, host=args.host, port=args.port)
     else:
-        mcp.run(transport=args.transport, host=args.host, port=args.port)
+        import uvicorn
+
+        uvicorn.run(build_http_app(args.transport), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
