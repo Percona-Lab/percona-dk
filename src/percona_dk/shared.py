@@ -35,6 +35,94 @@ def version_where(version: str | None) -> dict | None:
     ]}
 
 
+# ---------------------------------------------------------------------------
+# Indexed versions, read from the ingest config (REPOS) so tool descriptions
+# can't drift from what is actually ingested.
+# ---------------------------------------------------------------------------
+
+# Short product names agents know. A versioned repo missing here is listed
+# under its own short name, so a newly configured one still shows up.
+_PRODUCT_LABELS = {
+    "percona/psmysql-docs": "PS",
+    "percona/pxc-docs": "PXC",
+    "percona/pxb-docs": "PXB",
+    "percona/pdmysql-docs": "PDMySQL",
+    "percona/psmdb-docs": "PSMDB",
+    "percona/postgresql-docs": "PostgreSQL distribution",
+}
+
+VERSIONS_PLACEHOLDER = "{indexed_versions}"
+
+
+def parse_repos(raw: str) -> list[tuple[str, str | None]]:
+    """Parse a comma-separated REPOS string into (slug, branch) pairs.
+
+    Each entry is either "owner/repo" (clone default branch) or
+    "owner/repo:branch" (clone the named branch). Used to index multiple
+    versions of a doc repo as separate corpora tagged with version metadata.
+    """
+    out: list[tuple[str, str | None]] = []
+    for entry in (e.strip() for e in raw.split(",")):
+        if not entry:
+            continue
+        if ":" in entry:
+            slug, _, branch = entry.partition(":")
+            out.append((slug.strip(), branch.strip() or None))
+        else:
+            out.append((entry, None))
+    return out
+
+
+def _version_key(v: str) -> tuple:
+    return tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in v.split("."))
+
+
+def configured_versions(raw: str) -> dict[str, list[str]]:
+    """{repo slug: sorted versions} for each repo REPOS indexes per branch."""
+    out: dict[str, set[str]] = {}
+    for slug, branch in parse_repos(raw):
+        if branch:
+            out.setdefault(slug, set()).add(branch)
+    return {slug: sorted(vs, key=_version_key) for slug, vs in out.items()}
+
+
+def describe_versions(versions: dict[str, list[str]], by_repo: bool = False) -> list[str]:
+    """One line per group of repos that share a version list, for example
+    'PS / PXC / PXB / PDMySQL: "8.0", "8.4", "9.7"'. With `by_repo`, repos
+    are named by their short repo name (pxb-docs) instead of the product."""
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for slug, vs in versions.items():
+        name = slug.split("/")[-1] if by_repo else _PRODUCT_LABELS.get(slug, slug.split("/")[-1])
+        groups.setdefault(tuple(vs), []).append(name)
+    return [
+        " / ".join(names) + ": " + ", ".join(f'"{v}"' for v in vs)
+        for vs, names in groups.items()
+    ]
+
+
+def render_versions(doc: str, lines: list[str]) -> str:
+    """Replace the line holding VERSIONS_PLACEHOLDER with `lines`, keeping
+    that line's indentation."""
+    out: list[str] = []
+    for line in doc.splitlines():
+        if VERSIONS_PLACEHOLDER in line:
+            indent = line[: len(line) - len(line.lstrip())]
+            out.extend(indent + text for text in lines)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def with_versions(lines: list[str]) -> Callable:
+    """Decorator: fill a tool docstring's version placeholder. The original
+    docstring is kept on `__doc_template__` so it can be re-rendered."""
+    def deco(fn):
+        fn.__doc_template__ = fn.__doc__
+        fn.__doc__ = render_versions(fn.__doc__, lines)
+        return fn
+    return deco
+
+
 def _score(distance: float) -> float:
     # ChromaDB cosine distance: 0 = identical, 2 = opposite.
     # Convert to a 0-1 relevance score.

@@ -22,6 +22,7 @@ from percona_dk.shared import (
     FeedbackCategory,
     FeedbackSeverity,
     append_feedback,
+    configured_versions,
     format_search_markdown,
     paginate,
     resolve_page_url,
@@ -461,6 +462,13 @@ def health():
         doc_count=doc_count,
         uptime_seconds=round(uptime, 1),
     )
+
+
+@app.get("/versions")
+def versions() -> dict[str, list[str]]:
+    """Indexed versions per multi-version repo, from the ingest config
+    (REPOS). The remote shim lists these in its tool descriptions."""
+    return configured_versions(os.getenv("REPOS", ""))
 
 
 def main():
