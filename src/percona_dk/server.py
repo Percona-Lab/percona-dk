@@ -22,10 +22,11 @@ from percona_dk.shared import (
     FeedbackCategory,
     FeedbackSeverity,
     append_feedback,
+    configured_versions,
     format_search_markdown,
     paginate,
     resolve_page_url,
-    version_where,
+    search_chunks,
 )
 
 # Find .env relative to repo root so the server works regardless of cwd.
@@ -197,11 +198,7 @@ def search(req: SearchRequest):
     """Semantic search over Percona documentation. Returns top-k ranked chunks."""
     collection = _get_collection()
 
-    results = collection.query(
-        query_texts=[req.query],
-        n_results=req.top_k,
-        where=version_where(req.version),
-    )
+    results = search_chunks(collection, req.query, req.top_k, req.version, _known_versions())
 
     items: list[SearchResult] = []
     if results["documents"] and results["documents"][0]:
@@ -275,11 +272,7 @@ def search_get(
         GET /search?q=pxc+bootstrap+first+node&version=8.4&top_k=5
     """
     top_k = max(1, min(top_k, 20))
-    results = _get_collection().query(
-        query_texts=[q],
-        n_results=top_k,
-        where=version_where(version),
-    )
+    results = search_chunks(_get_collection(), q, top_k, version, _known_versions())
     n = len(results["documents"][0]) if results["documents"] else 0
     log.info("GET search: %r → %d results", q[:80], n)
     body = format_search_markdown(q, results, version, _get_repo_versions)
@@ -461,6 +454,17 @@ def health():
         doc_count=doc_count,
         uptime_seconds=round(uptime, 1),
     )
+
+
+def _known_versions() -> set[str]:
+    return {v for vs in configured_versions(os.getenv("REPOS", "")).values() for v in vs}
+
+
+@app.get("/versions")
+def versions() -> dict[str, list[str]]:
+    """Indexed versions per multi-version repo, from the ingest config
+    (REPOS). The remote shim lists these in its tool descriptions."""
+    return configured_versions(os.getenv("REPOS", ""))
 
 
 def main():

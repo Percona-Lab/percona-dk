@@ -35,6 +35,154 @@ def version_where(version: str | None) -> dict | None:
     ]}
 
 
+# ---------------------------------------------------------------------------
+# Indexed versions, read from the ingest config (REPOS) so tool descriptions
+# can't drift from what is actually ingested.
+# ---------------------------------------------------------------------------
+
+# Short product names agents know. A versioned repo missing here is listed
+# under its own short name, so a newly configured one still shows up.
+_PRODUCT_LABELS = {
+    "percona/psmysql-docs": "PS",
+    "percona/pxc-docs": "PXC",
+    "percona/pxb-docs": "PXB",
+    "percona/pdmysql-docs": "PDMySQL",
+    "percona/psmdb-docs": "PSMDB",
+    "percona/postgresql-docs": "PostgreSQL distribution",
+}
+
+VERSIONS_PLACEHOLDER = "{indexed_versions}"
+
+
+def parse_repos(raw: str) -> list[tuple[str, str | None]]:
+    """Parse a comma-separated REPOS string into (slug, branch) pairs.
+
+    Each entry is either "owner/repo" (clone default branch) or
+    "owner/repo:branch" (clone the named branch). Used to index multiple
+    versions of a doc repo as separate corpora tagged with version metadata.
+    """
+    out: list[tuple[str, str | None]] = []
+    for entry in (e.strip() for e in raw.split(",")):
+        if not entry:
+            continue
+        if ":" in entry:
+            slug, _, branch = entry.partition(":")
+            out.append((slug.strip(), branch.strip() or None))
+        else:
+            out.append((entry, None))
+    return out
+
+
+def _version_key(v: str) -> tuple:
+    return tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in v.split("."))
+
+
+def configured_versions(raw: str) -> dict[str, list[str]]:
+    """{repo slug: sorted versions} for each repo REPOS indexes per branch."""
+    out: dict[str, set[str]] = {}
+    for slug, branch in parse_repos(raw):
+        if branch:
+            out.setdefault(slug, set()).add(branch)
+    return {slug: sorted(vs, key=_version_key) for slug, vs in out.items()}
+
+
+def describe_versions(versions: dict[str, list[str]], by_repo: bool = False) -> list[str]:
+    """One line per group of repos that share a version list, for example
+    'PS / PXC / PXB / PDMySQL: "8.0", "8.4", "9.7"'. With `by_repo`, repos
+    are named by their short repo name (pxb-docs) instead of the product."""
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for slug, vs in versions.items():
+        name = slug.split("/")[-1] if by_repo else _PRODUCT_LABELS.get(slug, slug.split("/")[-1])
+        groups.setdefault(tuple(vs), []).append(name)
+    return [
+        " / ".join(names) + ": " + ", ".join(f'"{v}"' for v in vs)
+        for vs, names in groups.items()
+    ]
+
+
+def render_versions(doc: str, lines: list[str]) -> str:
+    """Replace the line holding VERSIONS_PLACEHOLDER with `lines`, keeping
+    that line's indentation."""
+    out: list[str] = []
+    for line in doc.splitlines():
+        if VERSIONS_PLACEHOLDER in line:
+            indent = line[: len(line) - len(line.lstrip())]
+            out.extend(indent + text for text in lines)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def with_versions(lines: list[str]) -> Callable:
+    """Decorator: fill a tool docstring's version placeholder. The original
+    docstring is kept on `__doc_template__` so it can be re-rendered."""
+    def deco(fn):
+        fn.__doc_template__ = fn.__doc__
+        fn.__doc__ = render_versions(fn.__doc__, lines)
+        return fn
+    return deco
+
+
+# A version written in the query, such as "9.7", "8.0.35" or "5.7.41-44".
+# Only major.minor is kept, since that is how version branches are named.
+_QUERY_VERSION_RE = re.compile(r"(?<![\w.])(\d+\.\d+)(?:\.\d+)*")
+
+# How far a chunk tagged with the version the query names is moved up the
+# ranking, in relevance-score units (0-1). Top results for a query are
+# usually within a few hundredths of each other; 0.03 was tuned on the live
+# index (0.05 pushed loosely related versioned pages above good forum hits).
+VERSION_BOOST = 0.03
+
+
+def query_version(query: str, known: set[str]) -> str | None:
+    """The one indexed version a query names, or None if it names none or
+    several (an upgrade question like "8.0 to 8.4" shouldn't favor either)."""
+    found = {m for m in _QUERY_VERSION_RE.findall(query) if m in known}
+    return found.pop() if len(found) == 1 else None
+
+
+def search_chunks(
+    collection: "chromadb.Collection",
+    query: str,
+    top_k: int,
+    version: str | None,
+    known_versions: set[str],
+) -> dict:
+    """Chroma query used by every search surface.
+
+    With `version`, results are scoped to it (plus version-agnostic
+    content). Without it, if the query names exactly one indexed version,
+    chunks tagged with that version are added and ranked up by
+    VERSION_BOOST, so "PS 9.7 release notes" finds the 9.7 docs instead of
+    older forum posts that only look similar. Returns chroma's shape.
+    """
+    results = collection.query(query_texts=[query], n_results=top_k, where=version_where(version))
+    named = None if version else query_version(query, known_versions)
+    if not named:
+        return results
+    tagged = collection.query(
+        query_texts=[query], n_results=top_k, where={"version": {"$eq": named}}
+    )
+    rows: dict[str, tuple] = {}
+    for res in (results, tagged):
+        if not res["ids"] or not res["ids"][0]:
+            continue
+        for row in zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]):
+            rows[row[0]] = row
+
+    def rank(row: tuple) -> float:
+        boost = VERSION_BOOST if (row[2].get("version") or "") == named else 0.0
+        return _score(row[3]) + boost
+
+    top = sorted(rows.values(), key=rank, reverse=True)[:top_k]
+    return {
+        "ids": [[r[0] for r in top]],
+        "documents": [[r[1] for r in top]],
+        "metadatas": [[r[2] for r in top]],
+        "distances": [[r[3] for r in top]],
+    }
+
+
 def _score(distance: float) -> float:
     # ChromaDB cosine distance: 0 = identical, 2 = opposite.
     # Convert to a 0-1 relevance score.

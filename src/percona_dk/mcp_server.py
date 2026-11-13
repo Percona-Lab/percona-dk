@@ -23,10 +23,13 @@ from percona_dk.shared import (
     FeedbackCategory,
     FeedbackSeverity,
     append_feedback,
+    configured_versions,
+    describe_versions,
     format_search_markdown,
     paginate,
     resolve_page_url,
-    version_where,
+    search_chunks,
+    with_versions,
 )
 
 # Try to load .env from multiple locations so the server works
@@ -58,6 +61,10 @@ DATA_DIR = (_env_dir / _data_path).resolve() if not _data_path.is_absolute() els
 REPOS_DIR = DATA_DIR / "repos"
 CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
+# Versions per multi-version repo, from the ingest config. Tool descriptions
+# and the server instructions are built from this, not hardcoded.
+INDEXED_VERSIONS = configured_versions(os.getenv("REPOS", ""))
+_NO_VERSIONS = "none (every configured repo is single-branch)"
 REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "7"))  # auto-refresh if older than N days
 LAST_INGEST_FILE = DATA_DIR / ".last_ingest"
 FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"
@@ -112,6 +119,21 @@ def _maybe_refresh():
 # ---------------------------------------------------------------------------
 # MCP Server
 # ---------------------------------------------------------------------------
+def _versions_paragraph() -> str:
+    lines = describe_versions(INDEXED_VERSIONS)
+    if not lines:
+        return "VERSIONS: every indexed repo is single-branch, so the `version` argument has no effect."
+    return (
+        "VERSIONS: indexed releases are " + "; ".join(lines) + ". Versions not "
+        "listed are not indexed. Pass the `version` argument to "
+        "search_percona_docs to scope results to a specific release when the "
+        "question is version-sensitive (config syntax, supported flags, "
+        "behavior changes). If the user has not stated their version, ask "
+        "before answering version-sensitive questions, or cite the version on "
+        "each snippet."
+    )
+
+
 mcp = FastMCP(
     "Percona Developer Knowledge",
     instructions=(
@@ -142,13 +164,7 @@ mcp = FastMCP(
         "Percona Backup for MongoDB (PBM), Percona Toolkit, Percona "
         "Monitoring and Management (PMM), and the Percona Operators for "
         "MySQL / PXC / PostgreSQL / MongoDB on Kubernetes.\n\n"
-        "VERSIONS: PS / PXC / PXB / PDMySQL are indexed on 8.0 and 8.4; "
-        "PSMDB on 6.0, 7.0, 8.0; PostgreSQL on 16 and 17. Pass the "
-        "`version` argument to search_percona_docs to scope results to a "
-        "specific release when the question is version-sensitive (config "
-        "syntax, supported flags, behavior changes). If the user has not "
-        "stated their version, ask before answering version-sensitive "
-        "questions, or cite the version on each snippet."
+        + _versions_paragraph()
     ),
 )
 
@@ -296,6 +312,7 @@ async def health(_request: Request) -> JSONResponse:
 
 
 @mcp.tool()
+@with_versions(describe_versions(INDEXED_VERSIONS) or [_NO_VERSIONS])
 def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) -> str:
     """Ground-truth Percona lookup for code generation, and the PRIMARY
     knowledge source for any question involving Percona products.
@@ -363,15 +380,11 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
         top_k: Number of results to return (1-20, default 5).
         version: Optional product version to scope results to. Indexed
                  versions:
-                   - PS / PXC / PXB / PDMySQL: "8.0", "8.4"
-                   - PSMDB: "6.0", "7.0", "8.0"
-                   - PostgreSQL distribution: "16", "17"
+                   {indexed_versions}
                  Operator docs (k8sps/k8spxc/k8spsmdb/k8spg), PMM, PBM,
                  Toolkit, Valkey, pg_tde, pgsm, everest, etc. are
-                 single-branch and ignore the version arg.
-
-                 NOT indexed: PXB 2.4 (EOL), PS 5.7 (EOL), MongoDB 5.0,
-                 PXB 9.x (~0.05% of deployed instances per telemetry).
+                 single-branch and ignore the version arg. Versions not
+                 listed above are not indexed.
 
                  When provided, only chunks tagged with that version -
                  plus version-agnostic content (community blog/forum,
@@ -382,15 +395,15 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
     """
     top_k = max(1, min(top_k, 20))
     collection = _get_collection()
-    results = collection.query(
-        query_texts=[query], n_results=top_k, where=version_where(version)
-    )
+    known = {v for vs in INDEXED_VERSIONS.values() for v in vs}
+    results = search_chunks(collection, query, top_k, version, known)
     n = len(results["documents"][0]) if results["documents"] else 0
     log.info("MCP search: %r → %d results", query[:80], n)
     return format_search_markdown(query, results, version, _get_repo_versions)
 
 
 @mcp.tool()
+@with_versions(describe_versions(INDEXED_VERSIONS, by_repo=True) or [_NO_VERSIONS])
 def get_percona_doc(
     repo: str | None = None,
     path: str | None = None,
@@ -414,15 +427,16 @@ def get_percona_doc(
     output ends with a line giving the `offset` for the next call.
 
     Repos:
-      - Multi-version (require `version`): psmysql-docs, pxc-docs,
-        pxb-docs, pdmysql-docs, psmdb-docs, postgresql-docs.
-      - Single-branch (ignore `version`): pmm-doc, pbm-docs, k8sps-docs,
-        k8spxc-docs, k8spsmdb-docs, k8spg-docs, percona-toolkit, pg_tde,
-        pgsm-docs, pcsm-docs, percona-valkey-doc, ps-binlog-server-docs,
-        proxysql-admin-tool-doc, pmm_dump_docs, repo-config-docs,
-        everest-doc.
-      - Community: percona-community-blog (blog), percona-forums (paths
-        like 't/12345/1.md').
+
+    - Multi-version (require `version`), with their indexed versions:
+      {indexed_versions}
+    - Single-branch (ignore `version`): pmm-doc, pbm-docs, k8sps-docs,
+      k8spxc-docs, k8spsmdb-docs, k8spg-docs, percona-toolkit, pg_tde,
+      pgsm-docs, pcsm-docs, percona-valkey-doc, ps-binlog-server-docs,
+      proxysql-admin-tool-doc, pmm_dump_docs, repo-config-docs,
+      everest-doc.
+    - Community: percona-community-blog (blog), percona-forums (paths
+      like 't/12345/1.md').
 
     Note: Percona XtraBackup docs are in `pxb-docs`, NOT a repo named
     `xtrabackup-docs`. Percona Backup for MongoDB docs are in `pbm-docs`.

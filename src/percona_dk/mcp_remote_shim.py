@@ -58,7 +58,10 @@ from percona_dk.shared import (
     DEFAULT_MAX_CHARS,
     FeedbackCategory,
     FeedbackSeverity,
+    describe_versions,
     paginate,
+    render_versions,
+    with_versions,
 )
 
 BACKEND_URL = os.getenv(
@@ -114,12 +117,14 @@ def _http_error_message(resp: requests.Response | None) -> str:
     )
 
 
-def _call_backend(method: str, endpoint: str, **kwargs) -> tuple[dict | None, str | None]:
+def _call_backend(
+    method: str, endpoint: str, timeout: float | None = None, **kwargs
+) -> tuple[dict | None, str | None]:
     """Call the REST backend. Returns (json, None), or (None, message) with
     a message the tool can hand straight back to the agent."""
     try:
         resp = requests.request(
-            method, f"{BACKEND_URL}{endpoint}", timeout=REQUEST_TIMEOUT, **kwargs
+            method, f"{BACKEND_URL}{endpoint}", timeout=timeout or REQUEST_TIMEOUT, **kwargs
         )
         resp.raise_for_status()
         return resp.json(), None
@@ -135,6 +140,36 @@ def _call_backend(method: str, endpoint: str, **kwargs) -> tuple[dict | None, st
     except Exception as e:
         log.exception("Unexpected error calling %s %s", method, endpoint)
         return None, f"Unexpected error calling Percona DK: {type(e).__name__}: {e}"
+
+
+# The tool descriptions list the backend's indexed versions. The shim has no
+# ingest config of its own, so main() asks the backend (GET /versions) and
+# fills them in before serving. Until then, or if the backend is unreachable,
+# the descriptions say so.
+_VERSIONS_PENDING = (
+    "unknown (the backend was unreachable when this connector started); "
+    'pass the version the question names, for example "8.4"'
+)
+
+
+def _load_versions() -> None:
+    """Fill the version lists in the tool descriptions from the backend."""
+    data, error = _call_backend("GET", "/versions", timeout=min(REQUEST_TIMEOUT, 5))
+    if error or not isinstance(data, dict):
+        log.warning("Could not load indexed versions from the backend")
+        return
+    versions = {str(k): [str(v) for v in vs] for k, vs in data.items() if isinstance(vs, list)}
+    for fn, lines in [
+        (search_percona_docs, describe_versions(versions)),
+        (get_percona_doc, describe_versions(versions, by_repo=True)),
+    ]:
+        # Re-register: FastMCP copies the Args text into the parameter
+        # schema, so patching the description alone would miss it.
+        fn.__doc__ = render_versions(
+            fn.__doc_template__, lines or ["none (every indexed repo is single-branch)"]
+        )
+        mcp.local_provider.remove_tool(fn.__name__)
+        mcp.tool()(fn)
 
 
 def _format_search_results(data: dict) -> str:
@@ -188,6 +223,7 @@ mcp = FastMCP(
 
 
 @mcp.tool()
+@with_versions([_VERSIONS_PENDING])
 def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) -> str:
     """Semantic search across Percona docs, blog, and forum threads.
 
@@ -221,15 +257,11 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
         top_k: Number of results to return (1-20, default 5).
         version: Optional product version to scope results to. Indexed
                  versions:
-                   - PS / PXC / PXB / PDMySQL: "8.0", "8.4"
-                   - PSMDB: "6.0", "7.0", "8.0"
-                   - PostgreSQL distribution: "16", "17"
+                   {indexed_versions}
                  Operator docs (k8sps/k8spxc/k8spsmdb/k8spg), PMM, PBM,
                  Toolkit, Valkey, pg_tde, pgsm, everest, etc. are
-                 single-branch and ignore the version arg.
-
-                 NOT indexed: PXB 2.4 (EOL), PS 5.7 (EOL), MongoDB 5.0,
-                 PXB 9.x (~0.05% of deployed instances per telemetry).
+                 single-branch and ignore the version arg. Versions not
+                 listed above are not indexed.
 
                  When provided, only chunks tagged with that version -
                  plus version-agnostic content (community blog/forum,
@@ -249,6 +281,7 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
 
 
 @mcp.tool()
+@with_versions([_VERSIONS_PENDING])
 def get_percona_doc(
     repo: str | None = None,
     path: str | None = None,
@@ -272,15 +305,16 @@ def get_percona_doc(
     output ends with a line giving the `offset` for the next call.
 
     Repos:
-      - Multi-version (require `version`): psmysql-docs, pxc-docs,
-        pxb-docs, pdmysql-docs, psmdb-docs, postgresql-docs.
-      - Single-branch (ignore `version`): pmm-doc, pbm-docs, k8sps-docs,
-        k8spxc-docs, k8spsmdb-docs, k8spg-docs, percona-toolkit, pg_tde,
-        pgsm-docs, pcsm-docs, percona-valkey-doc, ps-binlog-server-docs,
-        proxysql-admin-tool-doc, pmm_dump_docs, repo-config-docs,
-        everest-doc.
-      - Community: percona-community-blog (blog), percona-forums (paths
-        like 't/12345/1.md').
+
+    - Multi-version (require `version`), with their indexed versions:
+      {indexed_versions}
+    - Single-branch (ignore `version`): pmm-doc, pbm-docs, k8sps-docs,
+      k8spxc-docs, k8spsmdb-docs, k8spg-docs, percona-toolkit, pg_tde,
+      pgsm-docs, pcsm-docs, percona-valkey-doc, ps-binlog-server-docs,
+      proxysql-admin-tool-doc, pmm_dump_docs, repo-config-docs,
+      everest-doc.
+    - Community: percona-community-blog (blog), percona-forums (paths
+      like 't/12345/1.md').
 
     Note: Percona XtraBackup docs are in `pxb-docs`, NOT a repo named
     `xtrabackup-docs`. Percona Backup for MongoDB docs are in `pbm-docs`.
@@ -387,6 +421,7 @@ def give_feedback(
 def main():
     """CLI entrypoint for `percona-dk-mcp-remote` (stdio MCP)."""
     log.info("Percona DK remote shim starting; backend=%s", BACKEND_URL)
+    _load_versions()
     mcp.run()
 
 
