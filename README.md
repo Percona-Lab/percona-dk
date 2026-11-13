@@ -146,6 +146,8 @@ Percona doc repos (GitHub)
 
 **Indexed versions.** A repo is indexed per version by listing it once per branch in `REPOS`, for example `percona/psmysql-docs:8.4,percona/psmysql-docs:9.7`. The tool descriptions and server instructions list these versions, built from `REPOS` at startup, so they always match what ingest indexes. The remote shim gets the same list from the backend's `GET /versions` when it starts.
 
+When a query names exactly one indexed version (for example "PS 9.7 release notes" or "XtraBackup 8.0.35") but `version` isn't passed, search also fetches chunks tagged with that version and ranks them up by a small fixed boost (0.03 relevance). Queries that name two versions, such as "upgrade 8.0 to 8.4", aren't boosted. Passing `version` still scopes results strictly.
+
 **Fetching a page by URL.** `get_percona_doc(url=...)` takes a page URL exactly as a search result prints it (`docs.percona.com`, `percona.community` or `forums.percona.com`) and resolves the repo, path and version from the index, so an 8.4 URL always returns the 8.4 file. Browser variants also resolve: `http://`, a `#anchor` or `?query`, the trailing-slash form instead of `.html`, and a forum topic link without the post number. `repo` / `path` / `version` keep working as before.
 
 **Paging large pages.** Some pages are very large (the Percona Toolkit pages run to 150k+ characters). `get_percona_doc` returns at most `max_chars` characters per call (default 30000), cut at a line break. A truncated page ends with a line like:

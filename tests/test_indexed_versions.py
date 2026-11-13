@@ -110,3 +110,77 @@ def test_shim_keeps_pending_text_when_backend_unreachable(monkeypatch):
     monkeypatch.setattr(mcp_remote_shim.requests, "request", down)
     mcp_remote_shim._load_versions()
     assert list_tools(mcp_remote_shim.mcp)["search_percona_docs"].inputSchema == before
+
+
+# ---------------------------------------------------------------------------
+# Queries that name a version without passing `version`
+# ---------------------------------------------------------------------------
+
+from percona_dk.shared import VERSION_BOOST, query_version, search_chunks  # noqa: E402
+
+KNOWN = {"8.0", "8.4", "9.7", "6.0", "7.0"}
+
+
+def test_query_version():
+    assert query_version("Percona Server for MySQL 9.7 release notes", KNOWN) == "9.7"
+    assert query_version("Percona XtraBackup 8.0.35 release notes", KNOWN) == "8.0"
+    assert query_version("PS 8.4.2-2 audit log", KNOWN) == "8.4"
+    assert query_version("upgrade from 8.0 to 8.4", KNOWN) is None  # names two
+    assert query_version("PS 5.7.41 released", KNOWN) is None        # not indexed
+    assert query_version("ver 19.7 and 8.40", KNOWN) is None         # no partial matches
+    assert query_version("pxc bootstrap first node", KNOWN) is None
+
+
+class FakeCollection:
+    """Returns canned rows per `where` filter and records each query."""
+
+    def __init__(self, rows_by_version: dict):
+        self.rows = rows_by_version
+        self.calls = []
+
+    def query(self, query_texts, n_results, where=None):
+        self.calls.append(where)
+        if where is None:
+            rows = self.rows["any"]
+        elif "$or" in where:
+            rows = self.rows["scoped"]
+        else:
+            rows = self.rows[where["version"]["$eq"]]
+        rows = rows[:n_results]
+        return {
+            "ids": [[r[0] for r in rows]],
+            "documents": [[r[0] for r in rows]],
+            "metadatas": [[{"version": r[1]} for r in rows]],
+            "distances": [[2 * (1 - r[2]) for r in rows]],  # score -> cosine distance
+        }
+
+
+def _ids(res):
+    return res["ids"][0]
+
+
+def test_search_boosts_the_version_the_query_names():
+    col = FakeCollection({
+        "any": [("forum-5.7", "", 0.910), ("operator-rn", "", 0.905), ("pd-9.7", "9.7", 0.900)],
+        "9.7": [("pd-9.7", "9.7", 0.900), ("ps-9.7", "9.7", 0.895)],
+    })
+    res = search_chunks(col, "PS 9.7 release notes", 3, None, KNOWN)
+    assert _ids(res) == ["pd-9.7", "ps-9.7", "forum-5.7"]
+    assert col.calls == [None, {"version": {"$eq": "9.7"}}]
+    # Scores shown to the agent are the real ones, not boosted.
+    assert res["distances"][0][0] == 2 * (1 - 0.900)
+
+
+def test_boost_does_not_beat_a_much_better_match():
+    col = FakeCollection({
+        "any": [("forum", "", 0.95)],
+        "8.0": [("doc-8.0", "8.0", 0.95 - VERSION_BOOST - 0.01)],
+    })
+    assert _ids(search_chunks(col, "redo log 8.0", 2, None, KNOWN)) == ["forum", "doc-8.0"]
+
+
+def test_no_boost_with_version_arg_or_no_version_named():
+    col = FakeCollection({"any": [("a", "", 0.9)], "scoped": [("b", "8.4", 0.9)]})
+    assert _ids(search_chunks(col, "PS 9.7 release notes", 5, "8.4", KNOWN)) == ["b"]
+    assert _ids(search_chunks(col, "upgrade 8.0 to 8.4", 5, None, KNOWN)) == ["a"]
+    assert len(col.calls) == 2  # one query each, no extra version query

@@ -28,7 +28,7 @@ from percona_dk.shared import (
     format_search_markdown,
     paginate,
     resolve_page_url,
-    version_where,
+    search_chunks,
     with_versions,
 )
 
@@ -395,9 +395,8 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
     """
     top_k = max(1, min(top_k, 20))
     collection = _get_collection()
-    results = collection.query(
-        query_texts=[query], n_results=top_k, where=version_where(version)
-    )
+    known = {v for vs in INDEXED_VERSIONS.values() for v in vs}
+    results = search_chunks(collection, query, top_k, version, known)
     n = len(results["documents"][0]) if results["documents"] else 0
     log.info("MCP search: %r → %d results", query[:80], n)
     return format_search_markdown(query, results, version, _get_repo_versions)
