@@ -221,15 +221,14 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
         top_k: Number of results to return (1-20, default 5).
         version: Optional product version to scope results to. Indexed
                  versions:
-                   - PS / PXC / PXB / PDMySQL: "8.0", "8.4"
+                   - PS / PXC / PXB / PDMySQL: "8.0", "8.4", "9.7"
                    - PSMDB: "6.0", "7.0", "8.0"
                    - PostgreSQL distribution: "16", "17"
                  Operator docs (k8sps/k8spxc/k8spsmdb/k8spg), PMM, PBM,
                  Toolkit, Valkey, pg_tde, pgsm, everest, etc. are
                  single-branch and ignore the version arg.
 
-                 NOT indexed: PXB 2.4 (EOL), PS 5.7 (EOL), MongoDB 5.0,
-                 PXB 9.x (~0.05% of deployed instances per telemetry).
+                 NOT indexed: PXB 2.4 (EOL), PS 5.7 (EOL), MongoDB 5.0.
 
                  When provided, only chunks tagged with that version -
                  plus version-agnostic content (community blog/forum,
