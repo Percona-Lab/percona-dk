@@ -13,10 +13,12 @@ from pathlib import Path
 import chromadb
 from dotenv import load_dotenv
 
+from percona_dk.index_store import current_chroma_dir
+
 load_dotenv()
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
-CHROMA_DIR = DATA_DIR / "chroma"
+CHROMA_DIR = current_chroma_dir(DATA_DIR)
 COLLECTION_NAME = "percona_docs"
 
 

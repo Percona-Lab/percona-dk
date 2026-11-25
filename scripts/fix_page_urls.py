@@ -31,9 +31,10 @@ load_dotenv(os.getenv("DOTENV_PATH"))
 
 import chromadb  # noqa: E402
 
+from percona_dk.index_store import current_chroma_dir  # noqa: E402
 from percona_dk.ingest import (  # noqa: E402
-    CHROMA_DIR,
     COLLECTION_NAME,
+    DATA_DIR,
     _build_page_url,
 )
 
@@ -49,7 +50,9 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    col = chromadb.PersistentClient(path=str(CHROMA_DIR)).get_collection(COLLECTION_NAME)
+    # Updates the live index generation in place (metadata only). The next
+    # ingest copies it forward, so the fix carries into later generations.
+    col = chromadb.PersistentClient(path=str(current_chroma_dir(DATA_DIR))).get_collection(COLLECTION_NAME)
     total = col.count()
     print(f"collection {COLLECTION_NAME!r}: {total} chunks")
 

@@ -782,6 +782,9 @@ def run_ingestion(install_dir: Path, selected_repos: list, existing_repos: list,
     print(c(BOLD, "Document ingestion"))
 
     chroma_dir = install_dir / "data" / "chroma"
+    # Since index generations, the index lives under data/index/ (CURRENT
+    # names the live one); data/chroma is the pre-generation layout.
+    index_pointer = install_dir / "data" / "index" / "CURRENT"
     env_path = install_dir / ".env"
 
     if platform.system() == "Windows":
@@ -796,7 +799,7 @@ def run_ingestion(install_dir: Path, selected_repos: list, existing_repos: list,
     disk_mb = total_docs // 2
     est_str = f"~{total_mins} min, ~{disk_mb}MB" if total_mins else "? min"
 
-    if chroma_dir.exists():
+    if chroma_dir.exists() or index_pointer.exists():
         repos_changed = set(selected_repos) != set(existing_repos)
 
         # Check how long ago the last ingest ran

@@ -405,12 +405,20 @@ The response is `{"id": "...", "category": "..."}`.
 
 4. **Repo suggestions**: If a search returns weak results and the query matches keywords from a repo that isn't indexed, the MCP server suggests adding that repo.
 
+5. **Index updates without downtime**: Ingest never writes to the index the servers are reading. Each run copies the live index into a new generation under `$DATA_DIR/index/generations/`, updates the copy incrementally, writes `index_meta.json` (chunk count and repo versions) next to it, and only then points `$DATA_DIR/index/CURRENT` at it. A failed run leaves the live index untouched. The REST API and MCP server check `CURRENT` every `INDEX_CHECK_SECONDS` (default 30), open and warm the new generation in the background, and switch to it in-process, so there is no restart and no failed request. The previous generation is kept for rollback; older ones are deleted.
+
+   ```bash
+   percona-dk-ingest --status     # current and previous generation
+   percona-dk-ingest --rollback   # switch back (run again to roll forward)
+   ```
+
 ## Project structure
 
 ```
 percona-dk/
 ├── src/percona_dk/
 │   ├── ingest.py          # Ingestion pipeline
+│   ├── index_store.py     # Index generations: staging, atomic switch, in-process reload
 │   ├── server.py          # FastAPI REST server
 │   ├── mcp_server.py      # MCP server for AI tools
 │   ├── shared.py          # Search formatting, URL resolution, paging (used by both servers)

@@ -8,6 +8,10 @@ semantic search.  ChromaDB handles embedding locally via its default model
 
 Supports incremental re-ingestion: on subsequent runs, only files whose
 content changed since the last ingest are re-chunked and re-embedded.
+
+Each run builds a new index generation (a copy of the live index, updated
+incrementally) and switches the servers to it only when the run succeeds;
+see index_store.py. A failed run leaves the live index untouched.
 """
 
 import json
@@ -21,6 +25,8 @@ from pathlib import Path
 import chromadb
 import git
 from dotenv import load_dotenv
+
+from percona_dk import index_store
 
 # Find .env relative to repo root so CLI commands work regardless of cwd.
 _pkg_dir = Path(__file__).resolve().parent.parent.parent
@@ -46,9 +52,12 @@ _raw_data = os.getenv("DATA_DIR", "data")
 _data_path = Path(_raw_data)
 DATA_DIR = (_env_dir / _data_path).resolve() if not _data_path.is_absolute() else _data_path.resolve()
 REPOS_DIR = DATA_DIR / "repos"
-CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
-FILES_MARKER = DATA_DIR / ".last_ingest_files.json"
+
+# Refuse to publish a generation that lost more than this share of the live
+# index's chunks (a broken run, not a real docs change: ingest never drops
+# repos that leave REPOS). Set INGEST_MIN_KEEP_RATIO=0 to publish anyway.
+MIN_KEEP_RATIO = float(os.getenv("INGEST_MIN_KEEP_RATIO", "0.5"))
 
 def _parse_repos(raw: str) -> list[tuple[str, str | None]]:
     """Parse a comma-separated REPOS string into (slug, branch) pairs.
@@ -407,14 +416,15 @@ def _scan_file_hashes(repo_slug: str, repo_path: Path) -> dict[str, str]:
 # ChromaDB helpers
 # ---------------------------------------------------------------------------
 
-def _get_collection(create: bool = False) -> chromadb.Collection:
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+def _open_collection(chroma_dir: Path, create: bool = False):
+    """Return (client, collection) for the chroma dir being built."""
+    client = chromadb.PersistentClient(path=str(chroma_dir))
     if create:
-        return client.get_or_create_collection(
+        return client, client.get_or_create_collection(
             name=COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
         )
-    return client.get_collection(name=COLLECTION_NAME)
+    return client, client.get_collection(name=COLLECTION_NAME)
 
 
 def _delete_chunks_for_files(
@@ -538,147 +548,239 @@ def ingest(repos: list[tuple[str, str | None]] | list[str] | None = None) -> dic
     slug strings (treated as default branch). When omitted, DEFAULT_REPOS is
     used. Each (slug, branch) is treated as a distinct corpus, with chunks
     tagged with the branch as a `version` metadata field.
+
+    The run builds a new index generation and publishes it only if every
+    step succeeds; on any exception the live index is left as it was and
+    the half-built generation is deleted.
     """
     if repos is None:
         repo_specs: list[tuple[str, str | None]] = DEFAULT_REPOS
     else:
         repo_specs = [r if isinstance(r, tuple) else (r, None) for r in repos]
-    total_repos = len(repo_specs)
 
-    # Load stored file hashes from last run. Keys are "slug" (single-branch)
-    # or "slug@branch" (multi-version) so different branches have isolated
-    # change-detection state.
-    stored_hashes: dict[str, dict[str, str]] = {}
-    if FILES_MARKER.exists():
+    with index_store.ingest_lock(DATA_DIR):
+        # Leftovers of a failed or interrupted run.
+        index_store.cleanup_generations(DATA_DIR)
+        live = index_store.current_generation(DATA_DIR)
+        gen = index_store.stage_generation(DATA_DIR)
+        log.info("Building index generation %s in %s", gen.name, gen.path)
         try:
-            stored_hashes = json.loads(FILES_MARKER.read_text())
-        except Exception:
-            pass
+            stats = _build_generation(gen, repo_specs)
+            stats["repos"] = repos
+        except BaseException:
+            log.error(
+                "Ingestion failed; still serving generation %s, discarding %s",
+                live.name if live else None, gen.name,
+            )
+            index_store.discard_generation(gen)
+            raise
 
-    # Get or create ChromaDB collection
-    try:
-        collection = _get_collection(create=False)
-        collection_exists = True
-    except Exception:
-        collection = _get_collection(create=True)
-        collection_exists = False
-
-    new_hashes: dict[str, dict[str, str]] = {}
-    total_added = 0
-    total_deleted = 0
-
-    for idx, (repo_slug, branch) in enumerate(repo_specs, 1):
-        label = f"{repo_slug}@{branch}" if branch else repo_slug
-        hash_key = f"{repo_slug}@{branch}" if branch else repo_slug
-        if _INTERACTIVE:
-            print(f"  [{idx}/{total_repos}] {label} ...", flush=True)
-        else:
-            log.info("[%d/%d] Processing %s", idx, total_repos, label)
-
-        repo_path = clone_or_pull(repo_slug, branch)
-        if repo_path is None:
-            if _INTERACTIVE:
-                print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  (skipped - not found)", flush=True)
-            continue
-
-        current_hashes = _scan_file_hashes(repo_slug, repo_path)
-        new_hashes[hash_key] = current_hashes
-        repo_stored = stored_hashes.get(hash_key, {})
-
-        # Determine what changed
-        changed = [p for p, h in current_hashes.items() if repo_stored.get(p) != h]
-        deleted = [p for p in repo_stored if p not in current_hashes]
-
-        if collection_exists and repo_stored:
-            if not changed and not deleted:
-                if _INTERACTIVE:
-                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  (no changes)", flush=True)
-                else:
-                    log.info("No changes in %s", label)
-                continue
-
-            # Incremental: delete stale chunks, re-embed changed files
-            if _INTERACTIVE:
-                print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  ({len(changed)} changed, {len(deleted)} deleted)", flush=True)
-            else:
-                log.info("%s: %d changed, %d deleted files", label, len(changed), len(deleted))
-
-            if deleted or changed:
-                n_del = _delete_chunks_for_files(collection, repo_slug, deleted + changed, branch)
-                total_deleted += n_del
-
-            # Re-chunk and upsert changed files
-            chunks: list[dict] = []
-            for file_path in changed:
-                full_path = repo_path / file_path
-                if full_path.exists():
-                    text = full_path.read_text(encoding="utf-8", errors="replace")
-                    if full_path.suffix == ".rst":
-                        chunks.extend(chunk_rst(text, repo_slug, file_path, branch))
-                    else:
-                        chunks.extend(chunk_markdown(text, repo_slug, file_path, branch))
-
-            if chunks:
-                if _INTERACTIVE:
-                    print(f"\n  Embedding {len(chunks)} updated chunks ({label})...", flush=True)
-                n_added = _upsert_chunks(collection, chunks, label=label)
-                total_added += n_added
-
-        else:
-            # First time seeing this repo+branch - full chunk and embed
-            if _INTERACTIVE:
-                print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  (new - full ingest)...", flush=True)
-            chunks = collect_chunks(repo_slug, repo_path, branch)
-            if _INTERACTIVE:
-                print(f"\n  Embedding {len(chunks)} chunks ({label})...", flush=True)
-            if chunks:
-                n_added = _upsert_chunks(collection, chunks, label=label)
-                total_added += n_added
-                if _INTERACTIVE:
-                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  ({len(chunks)} chunks)", flush=True)
-
-    # Persist updated file hashes (merge: keep repos not in this run unchanged)
-    merged_hashes = {**stored_hashes, **new_hashes}
-    FILES_MARKER.parent.mkdir(parents=True, exist_ok=True)
-    FILES_MARKER.write_text(json.dumps(merged_hashes))
-
-    # Community content (blog + forum) — shares the same collection.
-    community_stats = {}
-    try:
-        from percona_dk.community import ingest_community
-        if _INTERACTIVE:
-            print("  [community] blog + forum ...", flush=True)
-        community_stats = ingest_community(collection)
-        total_added += community_stats.get("blog_added", 0) + community_stats.get("forum_added", 0)
-        total_deleted += community_stats.get("blog_deleted", 0) + community_stats.get("forum_deleted", 0)
-    except Exception:
-        log.exception("Community ingestion failed (continuing)")
+        previous = index_store.publish_generation(DATA_DIR, gen)
+        stats["generation"] = gen.name
+        stats["previous_generation"] = previous
+        stats["removed_generations"] = index_store.cleanup_generations(DATA_DIR)
 
     # Write timestamp marker for auto-refresh checks
     marker = DATA_DIR / ".last_ingest"
     marker.write_text(str(__import__("time").time()))
 
-    stats = {
-        "repos": repos,
-        "chunks_added": total_added,
-        "chunks_deleted": total_deleted,
-        "collection_count": collection.count(),
-        "community": community_stats,
-    }
     if not _INTERACTIVE:
         log.info("Ingestion complete: %s", stats)
     return stats
 
 
+def _build_generation(gen: index_store.Generation, repo_specs: list[tuple[str, str | None]]) -> dict:
+    """Ingest into the staged generation `gen` and write its index_meta.json.
+
+    Raises if the result shouldn't be published.
+    """
+    total_repos = len(repo_specs)
+    files_marker = gen.state_file(index_store.FILES_STATE_NAME)
+
+    # Load stored file hashes from last run. Keys are "slug" (single-branch)
+    # or "slug@branch" (multi-version) so different branches have isolated
+    # change-detection state. They were copied in with the index they describe.
+    stored_hashes: dict[str, dict[str, str]] = {}
+    if files_marker.exists():
+        try:
+            stored_hashes = json.loads(files_marker.read_text())
+        except Exception:
+            pass
+
+    # Get or create ChromaDB collection
+    try:
+        client, collection = _open_collection(gen.chroma_dir, create=False)
+        collection_exists = True
+    except Exception:
+        client, collection = _open_collection(gen.chroma_dir, create=True)
+        collection_exists = False
+    count_before = collection.count() if collection_exists else 0
+
+    try:
+        new_hashes: dict[str, dict[str, str]] = {}
+        total_added = 0
+        total_deleted = 0
+
+        for idx, (repo_slug, branch) in enumerate(repo_specs, 1):
+            label = f"{repo_slug}@{branch}" if branch else repo_slug
+            hash_key = f"{repo_slug}@{branch}" if branch else repo_slug
+            if _INTERACTIVE:
+                print(f"  [{idx}/{total_repos}] {label} ...", flush=True)
+            else:
+                log.info("[%d/%d] Processing %s", idx, total_repos, label)
+
+            repo_path = clone_or_pull(repo_slug, branch)
+            if repo_path is None:
+                if _INTERACTIVE:
+                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  (skipped - not found)", flush=True)
+                continue
+
+            current_hashes = _scan_file_hashes(repo_slug, repo_path)
+            new_hashes[hash_key] = current_hashes
+            repo_stored = stored_hashes.get(hash_key, {})
+
+            # Determine what changed
+            changed = [p for p, h in current_hashes.items() if repo_stored.get(p) != h]
+            deleted = [p for p in repo_stored if p not in current_hashes]
+
+            if collection_exists and repo_stored:
+                if not changed and not deleted:
+                    if _INTERACTIVE:
+                        print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  (no changes)", flush=True)
+                    else:
+                        log.info("No changes in %s", label)
+                    continue
+
+                # Incremental: delete stale chunks, re-embed changed files
+                if _INTERACTIVE:
+                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  ({len(changed)} changed, {len(deleted)} deleted)", flush=True)
+                else:
+                    log.info("%s: %d changed, %d deleted files", label, len(changed), len(deleted))
+
+                if deleted or changed:
+                    n_del = _delete_chunks_for_files(collection, repo_slug, deleted + changed, branch)
+                    total_deleted += n_del
+
+                # Re-chunk and upsert changed files
+                chunks: list[dict] = []
+                for file_path in changed:
+                    full_path = repo_path / file_path
+                    if full_path.exists():
+                        text = full_path.read_text(encoding="utf-8", errors="replace")
+                        if full_path.suffix == ".rst":
+                            chunks.extend(chunk_rst(text, repo_slug, file_path, branch))
+                        else:
+                            chunks.extend(chunk_markdown(text, repo_slug, file_path, branch))
+
+                if chunks:
+                    if _INTERACTIVE:
+                        print(f"\n  Embedding {len(chunks)} updated chunks ({label})...", flush=True)
+                    n_added = _upsert_chunks(collection, chunks, label=label)
+                    total_added += n_added
+
+            else:
+                # First time seeing this repo+branch - full chunk and embed
+                if _INTERACTIVE:
+                    print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  (new - full ingest)...", flush=True)
+                chunks = collect_chunks(repo_slug, repo_path, branch)
+                if _INTERACTIVE:
+                    print(f"\n  Embedding {len(chunks)} chunks ({label})...", flush=True)
+                if chunks:
+                    n_added = _upsert_chunks(collection, chunks, label=label)
+                    total_added += n_added
+                    if _INTERACTIVE:
+                        print(f"\033[A\033[2K  [{idx}/{total_repos}] {label}  ({len(chunks)} chunks)", flush=True)
+
+        # Persist updated file hashes (merge: keep repos not in this run unchanged)
+        merged_hashes = {**stored_hashes, **new_hashes}
+        files_marker.write_text(json.dumps(merged_hashes))
+
+        # Community content (blog + forum) - shares the same collection.
+        community_stats = {}
+        try:
+            from percona_dk.community import ingest_community
+            if _INTERACTIVE:
+                print("  [community] blog + forum ...", flush=True)
+            community_stats = ingest_community(
+                collection, state_file=gen.state_file(index_store.COMMUNITY_STATE_NAME)
+            )
+            total_added += community_stats.get("blog_added", 0) + community_stats.get("forum_added", 0)
+            total_deleted += community_stats.get("blog_deleted", 0) + community_stats.get("forum_deleted", 0)
+        except Exception:
+            log.exception("Community ingestion failed (continuing)")
+
+        count_after = collection.count()
+        if count_before and count_after < count_before * MIN_KEEP_RATIO:
+            raise RuntimeError(
+                f"New index has {count_after} chunks, down from {count_before}; "
+                f"refusing to publish (INGEST_MIN_KEEP_RATIO={MIN_KEEP_RATIO})."
+            )
+        if count_after == 0:
+            raise RuntimeError("New index is empty; refusing to publish.")
+
+        # The servers load this instead of scanning every chunk's metadata.
+        meta = index_store.write_meta(gen, index_store.compute_meta(collection))
+    finally:
+        # Release the generation's files before it's published or discarded.
+        index_store.close_client(client)
+
+    return {
+        "chunks_added": total_added,
+        "chunks_deleted": total_deleted,
+        "collection_count": meta["chunk_count"],
+        "community": community_stats,
+    }
+
+
 def main():
     """CLI entrypoint for percona-dk-ingest."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Percona DK ingestion")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--rollback", action="store_true",
+        help="Switch the servers back to the previous index generation (run again to roll forward).",
+    )
+    group.add_argument(
+        "--status", action="store_true",
+        help="Show the current and previous index generations.",
+    )
+    args = parser.parse_args()
+
+    if args.status:
+        ptr = index_store.read_pointer(DATA_DIR)
+        cur = index_store.current_generation(DATA_DIR)
+        meta = index_store.load_meta(cur) if cur else None
+        print(f"DATA_DIR:   {DATA_DIR}")
+        print(f"Current:    {cur.name if cur else '(no index)'}")
+        print(f"Previous:   {(ptr or {}).get('previous') or '-'}")
+        if meta:
+            print(f"Chunks:     {meta.get('chunk_count')}")
+            print(f"Built at:   {meta.get('built_at')}")
+        return
+
+    if args.rollback:
+        try:
+            with index_store.ingest_lock(DATA_DIR):
+                gen = index_store.rollback(DATA_DIR)
+        except (index_store.IngestBusy, RuntimeError) as e:
+            sys.exit(f"Rollback failed: {e}")
+        print(f"Rolled back to index generation {gen.name}. Servers switch within "
+              f"INDEX_CHECK_SECONDS (default {int(index_store.DEFAULT_CHECK_SECONDS)}s).")
+        return
+
     from percona_dk.version_check import print_version_notice
     print_version_notice()
-    result = ingest()
+    try:
+        result = ingest()
+    except index_store.IngestBusy as e:
+        sys.exit(str(e))
     added = result["chunks_added"]
     deleted = result["chunks_deleted"]
     total = result["collection_count"]
-    print(f"\n✓ Ingestion complete: {added} added, {deleted} removed — {total} chunks total")
+    print(f"\n✓ Ingestion complete: {added} added, {deleted} removed - {total} chunks total")
+    print(f"  Published index generation {result['generation']}")
 
 
 if __name__ == "__main__":

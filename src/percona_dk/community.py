@@ -121,18 +121,18 @@ def _get_xml(url: str, retries: int = 3) -> str:
     raise last_exc
 
 
-def _load_state() -> dict:
-    if STATE_FILE.exists():
+def _load_state(state_file: Path = STATE_FILE) -> dict:
+    if state_file.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
+            return json.loads(state_file.read_text())
         except Exception:
             pass
     return {"blog": {}, "forum": {}, "forum_categories": {}}
 
 
-def _save_state(state: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state))
+def _save_state(state: dict, state_file: Path = STATE_FILE) -> None:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(state))
 
 
 def _strip_html(html_content: str, preserve_headings: bool = True) -> str:
@@ -242,7 +242,7 @@ def _parse_blog_page(url: str, html: str) -> tuple[str, str, str]:
     return title or "Untitled", date, body
 
 
-def ingest_blog(collection, state: dict) -> tuple[int, int]:
+def ingest_blog(collection, state: dict, state_file: Path = STATE_FILE) -> tuple[int, int]:
     """Ingest blog posts via sitemap + HTML. Returns (added, deleted)."""
     blog_state: dict = state.setdefault("blog", {})
     log.info("Fetching blog sitemap from %s ...", BLOG_BASE)
@@ -272,7 +272,7 @@ def ingest_blog(collection, state: dict) -> tuple[int, int]:
     if not to_update:
         log.info("Blog: no changes")
         state["blog"] = current
-        _save_state(state)
+        _save_state(state, state_file)
         return 0, total_deleted
 
     log.info("Blog: %d posts to update", len(to_update))
@@ -313,7 +313,7 @@ def ingest_blog(collection, state: dict) -> tuple[int, int]:
 
     added = _upsert_chunks(collection, chunks, label=BLOG_SOURCE) if chunks else 0
     state["blog"] = current
-    _save_state(state)
+    _save_state(state, state_file)
     return added, total_deleted
 
 
@@ -477,7 +477,7 @@ def _build_topic_chunks(topic: dict, categories: dict[int, str]) -> tuple[list[d
     return chunks, file_paths, local_files
 
 
-def ingest_forum(collection, state: dict) -> tuple[int, int]:
+def ingest_forum(collection, state: dict, state_file: Path = STATE_FILE) -> tuple[int, int]:
     """Ingest forum topics. Returns (chunks_added, chunks_deleted)."""
     forum_state: dict = state.setdefault("forum", {})
     categories = _discourse_categories()
@@ -513,7 +513,7 @@ def ingest_forum(collection, state: dict) -> tuple[int, int]:
 
     if not to_update:
         log.info("Forum: no changes")
-        _save_state(state)
+        _save_state(state, state_file)
         return 0, total_deleted
 
     log.info("Forum: %d topics to update (batch_size=%d, delay=%.2fs)",
@@ -586,7 +586,7 @@ def ingest_forum(collection, state: dict) -> tuple[int, int]:
         # Flush when batch is full
         if len(pending) >= FORUM_UPSERT_BATCH:
             total_added += _flush()
-            _save_state(state)
+            _save_state(state, state_file)
 
         # Periodic progress log + rate window
         if i % 100 == 0:
@@ -606,12 +606,12 @@ def ingest_forum(collection, state: dict) -> tuple[int, int]:
             win_topics = 0
             win_fetch_ms = 0.0
             win_build_ms = 0.0
-            _save_state(state)
+            _save_state(state, state_file)
 
         time.sleep(REQUEST_DELAY)
 
     total_added += _flush()
-    _save_state(state)
+    _save_state(state, state_file)
     log.info("Forum: done in %.1fs, %d chunks added", time.time() - t_start, total_added)
     return total_added, total_deleted
 
@@ -621,17 +621,21 @@ def ingest_forum(collection, state: dict) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def ingest_community(collection) -> dict:
-    """Run blog + forum ingestion based on env flags. Returns stats dict."""
+def ingest_community(collection, state_file: Path = STATE_FILE) -> dict:
+    """Run blog + forum ingestion based on env flags. Returns stats dict.
+
+    `state_file` is the change-detection state for `collection`; ingest
+    passes the copy that lives inside the index generation being built.
+    """
     blog_enabled = os.getenv("INGEST_BLOG", "true").lower() in ("1", "true", "yes")
     forum_enabled = os.getenv("INGEST_FORUM", "true").lower() in ("1", "true", "yes")
 
-    state = _load_state()
+    state = _load_state(state_file)
     stats = {"blog_added": 0, "blog_deleted": 0, "forum_added": 0, "forum_deleted": 0}
 
     if blog_enabled:
         try:
-            added, deleted = ingest_blog(collection, state)
+            added, deleted = ingest_blog(collection, state, state_file)
             stats["blog_added"] = added
             stats["blog_deleted"] = deleted
         except Exception:
@@ -641,7 +645,7 @@ def ingest_community(collection) -> dict:
 
     if forum_enabled:
         try:
-            added, deleted = ingest_forum(collection, state)
+            added, deleted = ingest_forum(collection, state, state_file)
             stats["forum_added"] = added
             stats["forum_deleted"] = deleted
         except Exception:
@@ -649,5 +653,5 @@ def ingest_community(collection) -> dict:
     else:
         log.info("Forum ingestion disabled (INGEST_FORUM=false)")
 
-    _save_state(state)
+    _save_state(state, state_file)
     return stats

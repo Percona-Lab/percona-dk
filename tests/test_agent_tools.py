@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from fastmcp import Client
 
 from percona_dk import mcp_server, server
+from percona_dk.index_store import LiveIndex
 from percona_dk.shared import paginate, url_candidates
 
 
@@ -111,8 +112,7 @@ def corpus(tmp_path, monkeypatch):
     )
 
     for mod in (mcp_server, server):
-        monkeypatch.setattr(mod, "_collection", col)
-        monkeypatch.setattr(mod, "_repo_versions_cache", None)
+        monkeypatch.setattr(mod, "_index", LiveIndex.pinned(col))
         monkeypatch.setattr(mod, "REPOS_DIR", repos)
         monkeypatch.setattr(mod, "FEEDBACK_FILE", tmp_path / "feedback.jsonl")
     return tmp_path
