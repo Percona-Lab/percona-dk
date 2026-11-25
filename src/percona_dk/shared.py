@@ -258,3 +258,54 @@ def append_feedback(
         with feedback_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Index freshness (for /health on both servers)
+# ---------------------------------------------------------------------------
+
+LAST_INGEST_MARKER = ".last_ingest"
+
+
+def index_freshness(data_dir: Path, now: float | None = None) -> dict:
+    """Return {"last_ingest", "index_age_hours"} from DATA_DIR/.last_ingest.
+
+    ingest.py touches that marker at the end of every run, and
+    mcp_server.py's auto-refresh reads its mtime, so /health reports the
+    same timestamp. Both values are None when no ingest has completed.
+    """
+    marker = Path(data_dir) / LAST_INGEST_MARKER
+    try:
+        mtime = marker.stat().st_mtime
+    except OSError:
+        return {"last_ingest": None, "index_age_hours": None}
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+    return {
+        "last_ingest": datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="seconds"),
+        "index_age_hours": round(max(0.0, now - mtime) / 3600, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Header redaction (for request logging)
+# ---------------------------------------------------------------------------
+
+REDACTED = "[REDACTED]"
+_SECRET_HEADERS = frozenset({"authorization", "cookie", "set-cookie", "proxy-authorization"})
+
+
+def redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Copy of `headers` with credential-bearing values replaced.
+
+    Redacts Authorization, Cookie, Set-Cookie, Proxy-Authorization and any
+    header whose name contains "key" or "token" (X-Api-Key, X-Auth-Token,
+    ...), matched case-insensitively.
+    """
+    out = {}
+    for name, value in headers.items():
+        low = name.lower()
+        if low in _SECRET_HEADERS or "key" in low or "token" in low:
+            out[name] = REDACTED
+        else:
+            out[name] = value
+    return out

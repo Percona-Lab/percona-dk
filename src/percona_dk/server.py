@@ -23,6 +23,7 @@ from percona_dk.shared import (
     FeedbackSeverity,
     append_feedback,
     format_search_markdown,
+    index_freshness,
     paginate,
     resolve_page_url,
     version_where,
@@ -186,6 +187,14 @@ class HealthResponse(BaseModel):
     status: str
     doc_count: int
     uptime_seconds: float
+    last_ingest: str | None = Field(
+        default=None,
+        description="UTC ISO 8601 time the last ingest finished (DATA_DIR/.last_ingest), or null if none has.",
+    )
+    index_age_hours: float | None = Field(
+        default=None,
+        description="Hours since last_ingest, for stale-index alerting; null if no ingest has finished.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +457,7 @@ def feedback(req: FeedbackRequest):
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    """Service health check with doc count and uptime."""
+    """Service health check with doc count, uptime and index freshness."""
     try:
         collection = _get_collection()
         doc_count = collection.count()
@@ -460,6 +469,7 @@ def health():
         status="ok",
         doc_count=doc_count,
         uptime_seconds=round(uptime, 1),
+        **index_freshness(DATA_DIR),
     )
 
 
