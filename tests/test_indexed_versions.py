@@ -79,6 +79,9 @@ def test_mcp_server_lists_every_configured_version():
     data = json.loads(out.strip().splitlines()[-1])
     assert_all_listed(REPOS, data["instructions"], data["search_version"], data["get_doc"])
     assert "PXB 9.x" not in data["search_version"]
+    assert 'PS / PXC / PXB / PDMySQL: "9.7", "8.4", "8.0"' in data["search_version"]  # newest first
+    assert "indexed on 8.0 and 8.4" not in data["instructions"]
+    assert "use this server for questions about any of them" in data["instructions"]
 
 
 def test_mcp_server_lists_this_checkouts_config():

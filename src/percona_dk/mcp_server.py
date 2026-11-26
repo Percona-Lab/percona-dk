@@ -124,8 +124,9 @@ def _versions_paragraph() -> str:
     if not lines:
         return "VERSIONS: every indexed repo is single-branch, so the `version` argument has no effect."
     return (
-        "VERSIONS: indexed releases are " + "; ".join(lines) + ". Versions not "
-        "listed are not indexed. Pass the `version` argument to "
+        "VERSIONS: indexed releases are " + "; ".join(lines) + "; use this "
+        "server for questions about any of them. Versions not listed are not "
+        "indexed. Pass the `version` argument to "
         "search_percona_docs to scope results to a specific release when the "
         "question is version-sensitive (config syntax, supported flags, "
         "behavior changes). If the user has not stated their version, ask "

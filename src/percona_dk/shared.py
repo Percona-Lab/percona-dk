@@ -88,14 +88,15 @@ def configured_versions(raw: str) -> dict[str, list[str]]:
 
 def describe_versions(versions: dict[str, list[str]], by_repo: bool = False) -> list[str]:
     """One line per group of repos that share a version list, for example
-    'PS / PXC / PXB / PDMySQL: "8.0", "8.4", "9.7"'. With `by_repo`, repos
-    are named by their short repo name (pxb-docs) instead of the product."""
+    'PS / PXC / PXB / PDMySQL: "9.7", "8.4", "8.0"', newest first. With
+    `by_repo`, repos are named by their short repo name (pxb-docs) instead of
+    the product."""
     groups: dict[tuple[str, ...], list[str]] = {}
     for slug, vs in versions.items():
         name = slug.split("/")[-1] if by_repo else _PRODUCT_LABELS.get(slug, slug.split("/")[-1])
         groups.setdefault(tuple(vs), []).append(name)
     return [
-        " / ".join(names) + ": " + ", ".join(f'"{v}"' for v in vs)
+        " / ".join(names) + ": " + ", ".join(f'"{v}"' for v in reversed(vs))
         for vs, names in groups.items()
     ]
 
