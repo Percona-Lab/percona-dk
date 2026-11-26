@@ -67,9 +67,11 @@ def list_tools(mcp) -> dict:
 # Tool parity
 # ---------------------------------------------------------------------------
 
-def test_shim_tools_match_mcp_server():
+def test_shim_tools_match_mcp_server(backend):
     """Same tool names and input schemas; get_percona_doc and give_feedback
-    also share their descriptions."""
+    also share their descriptions. The shim lists versions only after it
+    loads them from the backend, as main() does at startup."""
+    mcp_remote_shim._load_versions()
     local, shim = list_tools(mcp_server.mcp), list_tools(mcp_remote_shim.mcp)
     assert set(shim) == set(local) == {"search_percona_docs", "get_percona_doc", "give_feedback"}
     for name in local:

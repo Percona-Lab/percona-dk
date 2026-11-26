@@ -22,6 +22,8 @@ import chromadb
 import git
 from dotenv import load_dotenv
 
+from percona_dk.shared import parse_repos
+
 # Find .env relative to repo root so CLI commands work regardless of cwd.
 _pkg_dir = Path(__file__).resolve().parent.parent.parent
 _env_dir = Path.cwd()  # default; updated if we find an actual .env
@@ -50,26 +52,7 @@ CHROMA_DIR = DATA_DIR / "chroma"
 COLLECTION_NAME = "percona_docs"
 FILES_MARKER = DATA_DIR / ".last_ingest_files.json"
 
-def _parse_repos(raw: str) -> list[tuple[str, str | None]]:
-    """Parse a comma-separated REPOS string into (slug, branch) pairs.
-
-    Each entry is either "owner/repo" (clone default branch) or
-    "owner/repo:branch" (clone the named branch). Used to index multiple
-    versions of a doc repo as separate corpora tagged with version metadata.
-    """
-    out: list[tuple[str, str | None]] = []
-    for entry in (e.strip() for e in raw.split(",")):
-        if not entry:
-            continue
-        if ":" in entry:
-            slug, _, branch = entry.partition(":")
-            out.append((slug.strip(), branch.strip() or None))
-        else:
-            out.append((entry, None))
-    return out
-
-
-DEFAULT_REPOS = _parse_repos(os.getenv("REPOS", "percona/psmysql-docs"))
+DEFAULT_REPOS = parse_repos(os.getenv("REPOS", "percona/psmysql-docs"))
 
 MAX_CHUNK_CHARS = 4000  # rough limit to stay within token budget
 
