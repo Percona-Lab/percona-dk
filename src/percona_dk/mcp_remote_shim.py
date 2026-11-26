@@ -220,10 +220,10 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
                product names, configuration flags, or full questions.
         top_k: Number of results to return (1-20, default 5).
         version: Optional product version to scope results to. Indexed
-                 versions:
-                   - PS / PXC / PXB / PDMySQL: "8.0", "8.4", "9.7"
-                   - PSMDB: "6.0", "7.0", "8.0"
-                   - PostgreSQL distribution: "16", "17"
+                 versions include:
+                   - PS / PXC / PXB / PDMySQL: "9.7", "8.4", "8.0"
+                   - PSMDB: "8.0", "7.0", "6.0"
+                   - PostgreSQL distribution: "17", "16"
                  Operator docs (k8sps/k8spxc/k8spsmdb/k8spg), PMM, PBM,
                  Toolkit, Valkey, pg_tde, pgsm, everest, etc. are
                  single-branch and ignore the version arg.

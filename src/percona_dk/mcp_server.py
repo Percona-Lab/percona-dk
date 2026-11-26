@@ -142,8 +142,9 @@ mcp = FastMCP(
         "Percona Backup for MongoDB (PBM), Percona Toolkit, Percona "
         "Monitoring and Management (PMM), and the Percona Operators for "
         "MySQL / PXC / PostgreSQL / MongoDB on Kubernetes.\n\n"
-        "VERSIONS: PS / PXC / PXB / PDMySQL are indexed on 8.0, 8.4 and 9.7; "
-        "PSMDB on 6.0, 7.0, 8.0; PostgreSQL on 16 and 17. Pass the "
+        "VERSIONS: the indexed releases include 9.7, 8.4 and 8.0 for PS / "
+        "PXC / PXB / PDMySQL, 8.0, 7.0 and 6.0 for PSMDB, and 17 and 16 for "
+        "PostgreSQL; use this server for questions about any of them. Pass the "
         "`version` argument to search_percona_docs to scope results to a "
         "specific release when the question is version-sensitive (config "
         "syntax, supported flags, behavior changes). If the user has not "
@@ -362,10 +363,10 @@ def search_percona_docs(query: str, top_k: int = 5, version: str | None = None) 
                product names, configuration flags, or full questions.
         top_k: Number of results to return (1-20, default 5).
         version: Optional product version to scope results to. Indexed
-                 versions:
-                   - PS / PXC / PXB / PDMySQL: "8.0", "8.4", "9.7"
-                   - PSMDB: "6.0", "7.0", "8.0"
-                   - PostgreSQL distribution: "16", "17"
+                 versions include:
+                   - PS / PXC / PXB / PDMySQL: "9.7", "8.4", "8.0"
+                   - PSMDB: "8.0", "7.0", "6.0"
+                   - PostgreSQL distribution: "17", "16"
                  Operator docs (k8sps/k8spxc/k8spsmdb/k8spg), PMM, PBM,
                  Toolkit, Valkey, pg_tde, pgsm, everest, etc. are
                  single-branch and ignore the version arg.
